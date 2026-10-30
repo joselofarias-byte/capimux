@@ -148,7 +148,7 @@ func GetStatus() *UpdaterStatus {
 
 // CheckUpdate queries remote version sources (manifest or GitHub Releases API) and compares semver.
 func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
-	updateURL := lo.CoalesceOrEmpty(os.Getenv("UPDATE_URL"), DefaultUpdateURL)
+	updateURL := canonicalUpdateURL(lo.CoalesceOrEmpty(os.Getenv("UPDATE_URL"), DefaultUpdateURL))
 
 	// 1. Try manifest URL first
 	info, err := checkManifest(ctx, updateURL)
@@ -161,7 +161,7 @@ func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	// 2. Fallback to GitHub Releases API
-	repo := lo.CoalesceOrEmpty(os.Getenv("UPDATE_REPO"), DefaultGitHubRepo)
+	repo := canonicalUpdateRepo(lo.CoalesceOrEmpty(os.Getenv("UPDATE_REPO"), DefaultGitHubRepo))
 	ghURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	log.Debug("updater", "checking github releases fallback", "repo", repo)
 
