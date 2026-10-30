@@ -1,11 +1,13 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-29 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-29, 23:10 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
 
 Ciclo 1 del prompt maestro: reconocimiento del repositorio real, auditoría orientada a seguridad y fiabilidad, selección de los cinco problemas de mayor impacto y entrega de correcciones verificadas en PR independientes y trazables, sin merges, despliegues ni gastos de API.
+
+Ciclo 2 (instrucciones del dueño, 2026-10-29 22:46 UTC-3): documentar el incidente Tailscale y aislar las pruebas del binario real; preparar #145 y re-apuntar #146 a `main`; PR separados para la gestión de API keys por claves secundarias (#121), `go test -race` en CI y SHA-256 obligatorio en el updater (sobre #140).
 
 ## 2. Estado inicial
 
@@ -22,9 +24,9 @@ Ciclo 1 del prompt maestro: reconocimiento del repositorio real, auditoría orie
 |---|-----------|----------|---------|----------|--------|
 | 1 | Crítica (seguridad) | Una API key de cliente (la que se le da a Chatbox/OpenCode) atraviesa `RequireDashboardAuth` y podía: desactivar `requireLogin`, fijar la contraseña del panel cuando aún no hay hash (se acepta `currentPassword` vacío), cambiar `authMode`/OIDC/SAML, habilitar `tunnelDashboardAccess`, reescribir `tunnelUrl`/`tailscaleUrl` y ejecutar `POST /api/tunnel/tailscale-enable` (corre `tailscale up --reset` y `tailscale funnel --bg`). Escalada de clave de inferencia a administrador completo y exposición pública del host. | Toma total del panel (export de base con todas las credenciales tras fijar contraseña), bloqueo del dueño, publicación por Funnel. | Bajo | **Corregido en PR #145** |
 | 2 | Alta (seguridad) | La misma API key puede cambiar el destino de credenciales existentes: `PUT /api/connections/{id}` con `providerSpecificData.baseUrl` (reproducido con binario real: el `baseUrl` de una conexión del dueño quedó apuntando a un host arbitrario), vincular proxy pools, editar `baseUrl` de nodos y URL de proxy pools. | La siguiente petición por esa conexión enviaría la clave del dueño al host elegido. | Bajo-medio | **Corregido en PR #146 (apilado)** |
-| 3 | Media (seguridad) | Resto de escritura administrativa con API key: crear/borrar/alternar otras API keys, importar credenciales (`/api/oauth/codex/bulk-import` no tiene la protección que #119 dio a Grok). Se usa legítimamente (p. ej. `scripts/workbuddy-termux-bootstrap.sh` importa con API key), así que la solución correcta es la de claves con alcance (#121) y no un bloqueo global. | Integridad del pool de cuentas, DoS sobre otras claves. | Medio | Pendiente (coordinar con #121) |
+| 3 | Media (seguridad) | Resto de escritura administrativa con API key: crear/borrar/alternar otras API keys, importar credenciales (`/api/oauth/codex/bulk-import` no tiene la protección que #119 dio a Grok). La importación se usa legítimamente (`scripts/workbuddy-termux-bootstrap.sh` importa con API key), así que no se bloquea globalmente. | Integridad del pool de cuentas, DoS sobre otras claves. | Medio | **Gestión de API keys corregida en PR #148**; importación pendiente |
 | 4 | Media (fiabilidad) | OAuth-01: `HandleOAuthKiroSocialExchange` usa `http.Post` (cliente por defecto **sin timeout**) y los helpers device-code usan `http.NewRequest` sin contexto: cancelación/apagado no cortan las llamadas salientes. | Goroutines colgadas y peticiones del panel que no terminan. | Bajo-medio | **Kiro social corregido en PR #147**; resto de `device.go` pendiente |
-| 5 | Media (verificación) | VER-01/CI-01: la CI no ejecuta `go test -race ./...`; varios borradores de seguridad (#130, #139, #140, #141) siguen sin CI ni validación Termux; el updater sigue *fail-open* sin SHA (OPS-01, cubierto por #140 en borrador) y `fork_defaults.go` apunta al nombre viejo `joselofarias-byte/9router-go` (hoy funciona por la redirección de GitHub). | Regresiones de concurrencia no detectadas; reemplazo del binario sin verificación de integridad. | Bajo-medio | Pendiente (#140 cubre parte) |
+| 5 | Media (verificación) | VER-01/CI-01: la CI no ejecuta `go test -race ./...`; varios borradores de seguridad (#130, #139, #140, #141) siguen sin CI ni validación Termux; el updater sigue *fail-open* sin SHA (OPS-01, cubierto por #140 en borrador) y `fork_defaults.go` apunta al nombre viejo `joselofarias-byte/9router-go` (hoy funciona por la redirección de GitHub). | Regresiones de concurrencia no detectadas; reemplazo del binario sin verificación de integridad. | Bajo-medio | **`-race` en CI: PR #149**; **SHA-256 obligatorio: #140 + PR #150** |
 
 ## 4. Trabajo implementado
 
@@ -36,6 +38,15 @@ Ciclo 1 del prompt maestro: reconocimiento del repositorio real, auditoría orie
 - `POST /api/tunnel/tailscale-enable`: 403 antes de ejecutar cualquier comando `tailscale`.
 
 **Hallazgo 2 (PR #146).** `internal/handlers/dashboard/destination_guard.go`: sin credencial administrativa y con `requireLogin` activo, 403 si cambia `baseUrl`, `connectionProxy*`, `strictProxy`, `vercelRelayUrl`, `proxyPoolId` o cualquier `*Url`/`*Endpoint` de una conexión (nivel superior o `providerSpecificData`), la URL base de un nodo o `urls`/`proxyUrl`/`type`/`noProxy`/`strictProxy` de un proxy pool (comparando con la fila guardada). Ediciones ordinarias siguen permitidas.
+
+**Hallazgo 3 (PR #148, pedido #121).** `admin_guard.go` agrega `denyClientKeyManagement`: `POST /api/keys`, `DELETE /api/keys/{id}` y `PUT /api/keys/{id}/toggle` devuelven 403 con mensaje en español si quien llama sólo tiene una API key de cliente. Autorización explícita: sesión de administrador, token CLI local o el ajuste `allowClientKeyManagement` (que sólo un administrador puede activar, porque se agregó a las claves de postura). `GET /api/keys` sigue funcionando y enmascarado. `workbuddy-termux-bootstrap.sh` no usa `/api/keys` (usa `/api/oauth/codebuddy-intl/import` y `/chat/completions`), así que sigue funcionando.
+
+**`go test -race` en CI (PR #149).** Nuevo job `race` («Go race detector») en `.github/workflows/ci.yml`: build de la SPA con Bun, Go 1.27, `go test -race -count=1 -timeout 20m ./...`. El push con el cambio de workflow fue **aceptado** (el token tiene scope `workflow`): no hubo bloqueo. Se estabilizó `TestGateAcquire_SpacesConcurrentCallers` (flaky por temporización: 35,49 ms contra 36 ms) con una tolerancia por intervalo y otra para el total.
+
+**Updater con SHA-256 obligatorio (PR #150, sobre el draft #140).** #140 ya rechaza hash ausente o malformado antes de descargar y compara en tiempo constante; no se duplicó. #150 sale de la cabeza de #140 y cierra los huecos que harían fallar actualizaciones legítimas o elegirían el hash equivocado:
+- `sha256s` por plataforma en el manifest (y `default`); el `sha256` único sigue funcionando.
+- El fallback de GitHub Releases usa el `digest: "sha256:…"` del asset elegido; antes nunca tenía hash.
+- `verifyDownloadedUpdate` acepta el digest del archivo descargado o el del ejecutable extraído.
 
 **Hallazgo 4, parcial (PR #147).** `HandleOAuthKiroSocialExchange`: `http.Post` → `http.NewRequestWithContext(r.Context())` + cliente OAuth compartido (timeout 15 s, `FallbackTransport`).
 
@@ -54,15 +65,28 @@ PR #146: `internal/handlers/dashboard/destination_guard.go` (+ `_test.go`), `con
 
 PR #147: `internal/handlers/oauth/oauth.go`, `internal/handlers/oauth/kiro_social_timeout_test.go`, `CHANGELOG.md`.
 
+#145, ciclo 2: `internal/handlers/dashboard/tunnel.go` (seams protegidos y guardia en `tailscale-disable`), `internal/handlers/dashboard/tailscale_guard_test.go` (nuevo), `internal/handlers/tailscale_router_fake_test.go` (nuevo), `tunnel_test.go`.
+
+PR #148: `admin_guard.go`, `apikeys.go`, `internal/handlers/client_key_management_test.go` (nuevo), `apikeys_reveal_test.go`, `dashboard_test.go`, `internal/integration/keys_test.go` (el ciclo de vida usa sesión de administrador, más un caso negativo con API key), `CHANGELOG.md`.
+
+PR #149: `.github/workflows/ci.yml`, `internal/fetchgate/gate_test.go`, `TECHNICAL_DEBT.md`, `CHANGELOG.md`.
+
+PR #150: `internal/updater/updater.go`, `internal/updater/sha256_sources_test.go` (nuevo), `CHANGELOG.md`, más los archivos de #140.
+
 ## 6. Commits, ramas y PR
 
 | PR | Rama | Base | Contenido |
 |----|------|------|-----------|
 | [#145](https://github.com/joselofarias-byte/capimux/pull/145) | `fix/inference-key-auth-posture-20261029` | `main` | Hallazgo 1 + este informe |
-| [#146](https://github.com/joselofarias-byte/capimux/pull/146) | `fix/inference-key-credential-destination-20261029` | rama de #145 (apilado: reutiliza su guardia) | Hallazgo 2 |
+| [#146](https://github.com/joselofarias-byte/capimux/pull/146) | `fix/inference-key-credential-destination-20261029` | `main` (antes apilado sobre #145) | Hallazgo 2 |
 | [#147](https://github.com/joselofarias-byte/capimux/pull/147) | `fix/oauth-kiro-social-timeout-20261029` | `main` (independiente) | Hallazgo 4 (Kiro social) |
+| [#148](https://github.com/joselofarias-byte/capimux/pull/148) | `fix/client-key-management-guard-20261029` | `main` (incluye commits de #145) | Hallazgo 3: gestión de API keys (#121) |
+| [#149](https://github.com/joselofarias-byte/capimux/pull/149) | `ci/go-race-detector-20261029` | `main` (independiente) | `go test -race` en CI |
+| [#150](https://github.com/joselofarias-byte/capimux/pull/150) | `fix/updater-sha256-sources-20261029` | `main` (incluye los 10 commits de #140) | Fuentes de SHA-256 del updater |
 
-Todos en borrador de revisión; ningún merge, push a `main` ni force-push.
+**Re-apuntado de #146:** mientras su base era la rama de #145, la CI no corría (el workflow sólo dispara para PR contra `main`). Se mergeó la rama de #145 dentro de #146 con un commit de merge (`0199717d`), **sin force-push**, y se cambió la base a `main`. Se verificó que siguen siendo ancestros los commits de #145 (`aacb2e27`, `017108af`, `9276b414`) y el propio de #146 (`17b84843`): no se perdió nada. **Consecuencia:** el diff de #146 contra `main` incluye los cambios de #145. Hay que mergear #145 primero; después #146 muestra sólo lo suyo. Lo mismo pasa con #148 (sale de #145) y con #150 (sale de #140). Commits de #145 hechos después del merge (por ejemplo, este informe) no están en #146 ni en #148; no hace falta, porque son sólo documentación.
+
+Ningún merge, push a `main`, force-push ni borrado de ramas.
 
 ## 7. Pruebas ejecutadas y resultados
 
@@ -76,10 +100,16 @@ Todos en borrador de revisión; ningún merge, push a `main` ni force-push.
 - PR #147: upstream local colgado + cancelación a 200 ms: con `http.Post` la prueba falla (sigue esperando a los 5 s), con el fix termina en ~0,2 s (502). Suite completa, `-race` de `oauth` y Termux arm64 OK.
 - Inestabilidad observada: `TestGateAcquire_SpacesConcurrentCallers` (`internal/fetchgate`) falló una vez por temporización bajo carga (35 ms vs. 40 ms) y pasó 3/3 al repetir, con y sin cambios: flaky preexistente, no relacionado.
 - No se ejecutaron pruebas con proveedores reales ni llamadas pagas: el cambio no toca el camino de inferencia.
+- PR #148: 4 casos negativos con el router real (API key crea, borra o alterna claves → 403) fallan sin el fix y pasan con él. Casos de regresión: el GET enmascarado, el token CLI, la autorización explícita del administrador y el borrado por el administrador. Binario real: en `main` una API key creó una clave elegida por el atacante (200, 2 claves); con el fix 403 (1 clave). La primera CI falló en `Integration tests`: `TestApiKeyLifecycle` (`-tags integration`, que no había corrido localmente) creaba claves con API key. Se corrigió para que use sesión de administrador y se agregó un subtest negativo. Ese subtest falla con el `apikeys.go` de `main` y pasa con el fix. Ahora la integración pasa localmente en las 6 ramas.
+- PR #149: `go test -race ./...` local completo en ~57 s; `fetchgate` con `-race -count=10` OK. En CI, el job nuevo «Go race detector» **pasó**.
+- PR #150: 3 tests nuevos (17 subtests), sólo `httptest`, sin reemplazar el binario de test. Revirtiendo el fix fallan 7 subtests. E2E con el binario real (`capimux update` sobre una copia en `/tmp`, manifest y asset en 127.0.0.1): sin sha, sha incorrecto y sha de otra plataforma → rechazado y binario intacto; `sha256s` del ejecutable o del `.tar.gz` → actualiza. El binario de `main` **instala sin verificar** cuando el manifest no trae sha.
+- CI en GitHub (al cierre): #145, #146, #147 y #149 en verde (test, integración, Docker, y en #149 también el race). Los estados de #148 (después de corregir la integración) y #150 figuran en el informe final.
 
 ## 8. Errores encontrados y corregidos
 
 - Escalada de privilegios API key → administrador del panel (hallazgo 1): corregido y verificado.
+- Test flaky de `fetchgate` por temporización: estabilizado en #149.
+- `TestApiKeyLifecycle` (integración) dependía de que una API key pudiera crear claves: actualizado en #148.
 - Incidente Tailscale del 2026-10-29: ver el apartado «Incidente Tailscale» al final de esta sección.
 
 ### Incidente Tailscale (2026-10-29)
@@ -110,7 +140,7 @@ Ninguna en este ciclo (no se reclaman).
 
 ## 10. Funciones nuevas
 
-Ninguna funcionalidad nueva de producto; sólo endurecimiento de autorización.
+Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por plataforma en el manifest del updater y el uso del digest de assets de GitHub (#150). El resto es endurecimiento.
 
 ## 11. Decisiones técnicas
 
@@ -118,11 +148,15 @@ Ninguna funcionalidad nueva de producto; sólo endurecimiento de autorización.
 - Con `requireLogin=false` el comportamiento se conserva: el panel ya está abierto por decisión del dueño.
 - Se compara contra el valor almacenado para no romper guardados de formulario completos.
 - Respuestas 403 con el formato plano `{error}` que la SPA muestra como texto.
+- Updater: se construyó sobre #140 en lugar de duplicarlo. Su rama no se modificó.
+- Guardia Tailscale: el test falla con un panic en vez de saltearse en silencio. Si una regresión intenta tocar el host, se ve.
 
 ## 12. Riesgos y asuntos pendientes
 
-- Hallazgo 3 (claves con alcance, coordinar con #121), resto del 4 (contexto en `device.go`) y 5 (`-race` en CI; puede requerir permiso `workflow` del token).
-- #146 está apilado sobre #145: mergear #145 primero y re-apuntar #146 a `main`.
+- Orden de merge: #145 → #146 y #148; #140 → #150. #147 y #149 son independientes.
+- Pendientes: importación de credenciales con API key (`/api/oauth/codex/bulk-import`, usada por flujos tipo workbuddy: requiere claves con alcance como #121) y contexto en `device.go` (resto de OAuth-01).
+- Updater: con #140/#150 una release sin hash deja de autoactualizar (fail-closed, intencional). El fork aún no publica releases. `release.yml`/`version.json` deberían publicar `sha256s`. `fork_defaults.go` sigue apuntando a `joselofarias-byte/9router-go`. Un hash no garantiza autenticidad: quien controle el manifest controla el hash, y el manifest firmado de #140 es el paso siguiente.
+- Incidente Tailscale: el estado serve/funnel previo de la máquina de Grok Bot es desconocido y no se restauró, por indicación del dueño.
 - Con `requireLogin=false` cualquiera que alcance el puerto sigue pudiendo fijar la contraseña; es la configuración elegida por el dueño, pero conviene advertirlo en la UI.
 - Si `requireLogin` está activo y nunca se fijó contraseña, el login sigue aceptando `123456`/`INITIAL_PASSWORD` (paridad upstream).
 - Falta validación física en Termux/Android del APK con este cambio (el APK usa el token CLI, que sigue autorizado).
@@ -133,4 +167,4 @@ Ninguna. Todo el análisis, la implementación y la verificación de este ciclo 
 
 ## 14. Estado final y siguiente prioridad
 
-Hallazgos 1 y 2 corregidos y verificados (#145, #146); hallazgo 4 corregido para Kiro social (#147). Nada mergeado. Siguiente prioridad: revisar/mergear #145 → #146; luego agregar `go test -race ./...` a la CI (VER-01) y cerrar el hallazgo 3 junto con #121.
+Corregidos y verificados: hallazgos 1 y 2 (#145, #146), la gestión de API keys del hallazgo 3 (#148), Kiro social (#147), `-race` en CI (#149) y las fuentes de SHA-256 del updater (#150, sobre #140). Pruebas aisladas de Tailscale real (#145). Nada mergeado. Siguiente prioridad: que el dueño revise y mergee en el orden indicado. Después: claves con alcance para la importación (#121), contexto en `device.go` y la publicación de `sha256s` en el pipeline de releases.
