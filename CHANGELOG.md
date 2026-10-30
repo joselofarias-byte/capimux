@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- OAuth device-code flows (Qoder, Kilo Code, Grok CLI, GitHub/Copilot, Kiro, Kimi, CodeBuddy, Muse) now pass the dashboard request context to every upstream call. Closing the login modal or shutting down cancels them, and each start/poll request has an overall 60 s budget. Muse's 429 key-mint backoff also stops on cancellation instead of sleeping up to 15 s.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
