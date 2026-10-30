@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Releases now publish an update manifest the mandatory-hash updater can actually install from: `release.yml` checks `SHA256SUMS.txt`, runs `go run ./cmd/release-manifest` to write `version.json` (one `downloadUrls`/`sha256s` entry per platform, cross-checked against `SHA256SUMS.txt`), and uploads it with the binaries. `make cross` also builds `android-arm64`, so Termux can self-update. The fork's default manifest is now `releases/latest/download/version.json`; the raw `main` manifest and the old repository's manifest map to it. A repository with no published release answers "up to date" instead of reporting a failed check. The generator refuses a non-tag version, plain http, unknown file names, two binaries for one platform, and any hash that disagrees with `SHA256SUMS.txt`, so the job fails rather than publishing a release the updater would refuse.
+
 - Updater: on top of the mandatory SHA-256 from #140, the manifest accepts `sha256s` per platform (`linux_arm64`, `default`, …; the single `sha256` is still honoured), the GitHub releases fallback uses each asset's own `digest: "sha256:…"`, and a digest may describe either the downloaded archive or the extracted executable. Missing, malformed, mismatched or other-platform digests are still refused before the binary is replaced.
 
 - Updater defaults now name the renamed fork `joselofarias-byte/capimux` instead of `joselofarias-byte/9router-go`, so self-update no longer depends on GitHub's rename redirect (which would silently follow any new repository created with the old name). An `UPDATE_REPO`/`UPDATE_URL` that still names the old fork is mapped to the new one; other explicit overrides are untouched. `scripts/bootstrap-codex-audit.sh` uses the new name.

@@ -13,7 +13,12 @@ import "strings"
 // Defaults therefore name the current repository, and an operator override
 // that still names the old one is mapped to it.
 const (
-	forkUpdateManifestURL = "https://raw.githubusercontent.com/joselofarias-byte/capimux/main/version.json"
+	// The release workflow publishes version.json (one URL and one SHA-256 per
+	// platform) as an asset of every release, and GitHub serves the newest
+	// non-prerelease one at this stable URL. The version.json in main stays
+	// for binaries built before this change.
+	forkUpdateManifestURL = "https://github.com/joselofarias-byte/capimux/releases/latest/download/version.json"
+	forkRawManifestURL    = "https://raw.githubusercontent.com/joselofarias-byte/capimux/main/version.json"
 	forkUpdateGitHubRepo  = "joselofarias-byte/capimux"
 	forkVersionSuffix     = "-fabric"
 
@@ -33,7 +38,7 @@ func canonicalUpdateRepo(repo string) string {
 // canonicalUpdateURL does the same for an UPDATE_URL that still points at the
 // pre-rename manifest.
 func canonicalUpdateURL(u string) string {
-	if strings.EqualFold(strings.TrimSpace(u), legacyForkManifestURL) {
+	if t := strings.TrimSpace(u); strings.EqualFold(t, legacyForkManifestURL) || strings.EqualFold(t, forkRawManifestURL) {
 		return forkUpdateManifestURL
 	}
 	return u
