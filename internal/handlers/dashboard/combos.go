@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -259,8 +258,9 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 
 // freeTierComboModels returns "alias/model" ids for every free-tier registry
 // model of providers with at least one active connection, skipping models the
-// user disabled on the provider page, ordered by provider alias
-// then model id so regenerating yields a stable, diffable list.
+// user disabled on the provider page, grouped by model family and ordered
+// newest version first inside each family (owner decision 4, cycle 9), with
+// the key as tie-break so regenerating yields a stable, diffable list.
 //
 // The free-tier marker is a naming convention, not a service kind: ":free" /
 // "/free" / "-free" also lands on embedding, image, tts and stt models
@@ -300,7 +300,7 @@ func (h *DashboardHandler) freeTierComboModels(ctx context.Context) ([]string, e
 			out = append(out, alias+"/"+modelID)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sortFreeTierModels(out)
 	return out, nil
 }
 

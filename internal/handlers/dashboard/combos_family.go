@@ -134,7 +134,7 @@ func (h *DashboardHandler) usableModelFamilies(ctx context.Context) (map[string]
 	}
 
 	for family := range groups {
-		sort.Strings(groups[family])
+		sortModelsByVersion(groups[family])
 	}
 	return groups, nil
 }
