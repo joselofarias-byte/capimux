@@ -28,6 +28,9 @@ var authPostureSettingKeys = []string{
 	"samlEntryPoint",
 	"samlIssuer",
 	"samlCert",
+	// Opt-in that lets client API keys manage other keys; a key must not be
+	// able to grant itself that.
+	clientKeyManagementSetting,
 	// Opt-in that lets client API keys add provider credentials; a key must
 	// not be able to grant itself that.
 	auth.ClientCredentialImportSetting,
@@ -74,4 +77,26 @@ func changedPostureKey(current, updates map[string]any) (string, bool) {
 
 func adminRequiredMessage(what string) string {
 	return fmt.Sprintf("No autorizado: %s requiere una sesión de administrador del panel o el token CLI local; una API key de cliente no alcanza.", what)
+}
+
+// clientKeyManagementSetting is the explicit opt-in (default off) that lets a
+// client API key create, delete or toggle API keys while login is enforced.
+// It can only be turned on by an admin (it is an auth-posture key).
+const clientKeyManagementSetting = "allowClientKeyManagement"
+
+// denyClientKeyManagement writes 403 and returns true when a caller holding
+// only a client API key tries to manage API keys without the opt-in. Without
+// this, one leaked key could mint a replacement for itself (surviving its own
+// revocation) or delete/disable every other key.
+func (h *DashboardHandler) denyClientKeyManagement(w http.ResponseWriter, r *http.Request, what string) bool {
+	if !h.requiresAdminForPosture(r) {
+		return false
+	}
+	if raw, err := h.Repo.GetSettingsRaw(); err == nil {
+		if allowed, _ := raw[clientKeyManagementSetting].(bool); allowed {
+			return false
+		}
+	}
+	writePlainError(w, http.StatusForbidden, adminRequiredMessage(what)+" Para permitirlo de forma explícita, un administrador puede activar el ajuste "+clientKeyManagementSetting+".")
+	return true
 }

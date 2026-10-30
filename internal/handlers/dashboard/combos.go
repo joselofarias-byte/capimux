@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -76,6 +77,10 @@ func (h *DashboardHandler) HandleCreateCombo(w http.ResponseWriter, r *http.Requ
 	}
 	if req.Strategy == "" {
 		req.Strategy = "fallback"
+	}
+	if !db.IsValidComboStrategy(req.Strategy) {
+		writeInvalidComboStrategy(w, req.Strategy)
+		return
 	}
 
 	modelsJSON := "[]"
@@ -160,9 +165,12 @@ func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
+	// An empty strategy leaves the saved one alone (UpdateCombo skips it), so
+	// editing the name, models or kind never rewrites the combo's strategy.
 	strategy := req.Strategy
-	if strategy == "" {
-		strategy = existing.Strategy
+	if strategy != "" && !db.IsValidComboStrategy(strategy) {
+		writeInvalidComboStrategy(w, strategy)
+		return
 	}
 	// Renaming a combo moves the bare name it answers to, so a rename gets the
 	// same check as a create. Leaving the name alone is unaffected: the guard
@@ -234,7 +242,7 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), "fallback"); err != nil {
+	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), ""); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -350,4 +358,11 @@ func (h *DashboardHandler) HandleDeleteCombo(w http.ResponseWriter, r *http.Requ
 	_ = h.Repo.DeleteKV(generatedCombosScope, id)
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+}
+
+// writeInvalidComboStrategy rejects a strategy the router does not implement,
+// instead of saving a value that would silently route as fallback.
+func writeInvalidComboStrategy(w http.ResponseWriter, strategy string) {
+	handlerutil.WriteJSONError(w, http.StatusBadRequest, fmt.Sprintf(
+		"estrategia de combo inválida %q: usá una de %s", strategy, strings.Join(db.ValidComboStrategies, ", ")))
 }
