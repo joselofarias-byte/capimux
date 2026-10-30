@@ -106,8 +106,17 @@ func (h *DashboardHandler) usableModelFamilies(ctx context.Context) (map[string]
 	}
 	// Custom models are first-class: a model the user added for a provider joins
 	// its family too, so a hand-added gateway model can backstop the catalog.
+	// Same gates as the catalog: the provider needs an active connection and the
+	// model must not be disabled (the provider page lists and disables custom
+	// models under the alias they were saved with).
 	for _, key := range custom {
 		alias, model := splitAliasModel(key)
+		if !activeProviderAlias(active, alias) {
+			continue
+		}
+		if _, off := disabled[alias][model]; off {
+			continue
+		}
 		groups[modelFamily(model)] = appendUnique(groups[modelFamily(model)], alias+"/"+model)
 	}
 
@@ -115,6 +124,26 @@ func (h *DashboardHandler) usableModelFamilies(ctx context.Context) (map[string]
 		sort.Strings(groups[family])
 	}
 	return groups, nil
+}
+
+// activeProviderAlias reports whether a stored provider alias ("bzl", or the
+// provider id itself) belongs to a provider with an active connection.
+func activeProviderAlias(active map[string]struct{}, alias string) bool {
+	if alias == "" {
+		return false
+	}
+	if _, ok := active[alias]; ok {
+		return true
+	}
+	if _, ok := active[providers.ResolveAlias(alias)]; ok {
+		return true
+	}
+	for providerID := range active {
+		if providers.GetProviderAlias(providerID) == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // isUsableChatModel reports whether alias/provider exposes modelID as a chat

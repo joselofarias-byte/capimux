@@ -222,7 +222,8 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 }
 
 // freeTierComboModels returns "alias/model" ids for every free-tier registry
-// model of providers with at least one connection, ordered by provider alias
+// model of providers with at least one active connection, skipping models the
+// user disabled on the provider page, ordered by provider alias
 // then model id so regenerating yields a stable, diffable list.
 //
 // The free-tier marker is a naming convention, not a service kind: ":free" /
@@ -232,21 +233,35 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 // never enters the fallback chain — same gate usableModelFamilies applies to
 // the auto-family combos.
 func (h *DashboardHandler) freeTierComboModels(ctx context.Context) ([]string, error) {
-	active, err := h.Repo.GetConnectedProviders(ctx)
+	conns, err := h.Repo.GetProviderConnections("", true)
 	if err != nil {
-		return nil, fmt.Errorf("freeTierComboModels: list providers: %w", err)
+		return nil, fmt.Errorf("freeTierComboModels: list connections: %w", err)
+	}
+	active := make(map[string]struct{}, len(conns))
+	for _, c := range conns {
+		if c.Provider != "" {
+			active[c.Provider] = struct{}{}
+		}
+	}
+	disabled, err := h.disabledModelsByAlias()
+	if err != nil {
+		return nil, fmt.Errorf("freeTierComboModels: disabled models: %w", err)
 	}
 
 	var out []string
 	for providerID := range active {
+		alias := providers.GetProviderAlias(providerID)
 		for _, modelID := range providers.GetProviderModels(providerID) {
+			if _, off := disabled[alias][modelID]; off {
+				continue
+			}
 			if !providers.IsFreeTierModel(modelID) {
 				continue
 			}
 			if kind := providers.GetProviderModelKind(providerID, modelID); kind != "" && kind != "llm" {
 				continue
 			}
-			out = append(out, providers.GetProviderAlias(providerID)+"/"+modelID)
+			out = append(out, alias+"/"+modelID)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
