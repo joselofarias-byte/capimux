@@ -123,6 +123,17 @@ func (h *ChatHandler) handleAccountFallback(
 		if err != nil || connObj == nil {
 			continue
 		}
+		// c.ID is passed as a pin, and an ineligible pin (account cooldown,
+		// model lock, quota cache, strict assignment) falls through to the
+		// strategy, which returns a different account. Serving that one here
+		// would run its credentials under c's ID: a success cleared the
+		// cooldown of the exhausted account c, and every cooled row re-sent
+		// the request to the same healthy account. Skip c; the account the
+		// strategy picked gets its own turn in this loop.
+		if connObj.ID != c.ID {
+			log.Debug("fallback", "skip ineligible connection", "conn", c.ID, "strategyPick", connObj.ID)
+			continue
+		}
 		apiKey := extractAPIKey(connData)
 		if apiKey == "" {
 			providerCfg, pErr := h.getProviderConfig(provider, connData)
