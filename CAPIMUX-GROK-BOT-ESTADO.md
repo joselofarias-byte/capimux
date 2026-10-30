@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 03:35 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 06:45 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -23,6 +23,8 @@ Ciclo 4, de consolidación (instrucciones del dueño, 2026-10-30 03:04 UTC-3). S
 - analizar los solapamientos del updater.
 
 Ver «Consolidación (ciclo 4)» en la sección 6.
+
+Ciclo 5 (instrucciones del dueño, 2026-10-30 06:06 UTC-3): auditar el fallback entre proveedores, el catálogo de modelos/proveedores y el recomendador, en local y desde `origin/main` actualizado (`47d6e0ce`). Ver «Auditoría (ciclo 5)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -200,7 +202,48 @@ Ningún merge, push a `main`, force-push ni borrado de ramas.
 
 **Candidatos a cerrar:** ninguno está vacío. Solo serían redundantes #140, #150 y #152 si se elige mergear únicamente #153.
 
-## 7. Pruebas ejecutadas y resultados
+### Auditoría (ciclo 5)
+
+PR **#157** (`fix/fallback-catalog-audit-20261030`, base `main` `47d6e0ce`, sin mergear). Contiene tres defectos reales. Cada uno tiene un test que falla en `main` y pasa con el arreglo mínimo:
+
+1. **`internal/handlers/chat/fallback.go` (`handleAccountFallback`).**
+   - Causa: cada fila se pasaba como pin a `getBestConnection`. Si la fila no era elegible (cooldown, lock de modelo, caché de cuota o asignación estricta), el pin devolvía otra cuenta. El forward usaba las credenciales de esa cuenta con el ID de la fila.
+   - Efectos:
+     - un éxito borraba el cooldown y el lock de la cuenta agotada, que volvía a usarse en la siguiente request;
+     - el uso y el refresh OAuth se atribuían a la fila equivocada;
+     - con un 500 o un error de red, la cuenta sana recibía un golpe por cada fila enfriada.
+   - Arreglo: saltar la fila si `connObj.ID != c.ID`.
+   - Tests: `fallback_cooldown_identity_test.go`.
+2. **`internal/handlers/chat/combo.go` (`handleComboFallback` y `handleMessagesComboFallback`).**
+   - Causa: un fallo no reintentable (400, 422, 500 o error de red) hacía `continue` sin excluir la cuenta.
+   - Efecto: el combo reenviaba a la misma cuenta hasta 10 veces por modelo, y la cuenta sana no se usaba.
+   - Arreglo: `triedThisEntry`, la lista de cuentas probadas por entrada y pasada.
+   - Tests: `combo_retry_same_account_test.go`. En `main` el test daba 10 golpes.
+3. **`internal/providers/registry_models.go` (`ProviderModelKinds`).**
+   - Causa: `gemini-2.5-pro`, `gemini-2.5-flash` y `gemini-2.5-flash-lite` figuran como chat y como STT, pero tenían un único kind `stt`.
+   - Efecto: quedaban fuera de `/v1/models`, del recomendador de combos por familia y del descubrimiento free.
+   - Arreglo: quitar el kind de esos tres ids.
+   - Tests: un invariante de catálogo más tests de `isLLMModelEntry` e `isUsableChatModel`, con negativos para TTS, imagen, embedding y deshabilitados.
+
+**Revisado sin hallazgos:**
+- `retry_after.go` y la clasificación 4xx/5xx/429:
+  - `RetryableStatusCodes` 401/403/429/502/503/504 excluye la cuenta;
+  - 500 y los errores de red son transitorios (una cuenta más);
+  - el resto de los 4xx corta en el fallback de cuentas.
+- `controlplane/routing` (`SelectCandidates`), `controlplane/scoring` y la lógica sticky de `applyComboStrategy`.
+- `comboLockRetryable` y el segundo pase acotado del combo:
+  - como máximo 2 pasadas, así que no hay bucle infinito;
+  - `excludeIDs` se reinicia solo entre pasadas.
+- `comboConnection`: no usa la clave por defecto si hay cuentas configuradas no seleccionables.
+- Catálogo:
+  - no hay ids vacíos;
+  - el único duplicado era el de Gemini;
+  - las claves de `ProviderModels` que no son proveedores son alias válidos;
+  - `ProviderAliases` (de `catalog_sync`) apunta a ids de models.dev, así que es correcto.
+- `freecoding discover` muta una URL global, pero solo se usa desde la CLI.
+
+`-race` no detectó carreras en los paquetes tocados.
+
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
 - Prueba de handler con `tailscale` simulado: un llamador no administrador nunca ejecuta comandos.
@@ -228,6 +271,15 @@ Ningún merge, push a `main`, force-push ni borrado de ramas.
 - PR #154: 3 tests (14 formatos, clamp y un test end-to-end por `handleAccountFallback` con HTTP y SQLite reales, donde la cuenta queda en cooldown ~45 s y no 2 s). Los 3 fallan sin el fix.
 - Cada rama del ciclo 3 pasó la suite completa, vet, `-race` de los paquetes tocados, integración y el build de Termux arm64.
 - CI en GitHub (al cierre): #145–#153 en verde (test, integración y Docker; en #149 también el race). #154 recién abierto, con la CI en curso.
+
+Ciclo 5 (#157, corrido localmente el 2026-10-30):
+- `go build ./...` y `go vet ./...`: OK.
+- `go test -count=1 ./...`: OK en los 44 paquetes.
+- `go test -race` en `handlers/chat`, `handlers/dashboard`, `providers` y `controlplane/...`: OK.
+- Los tests nuevos con `-count=5`: OK.
+- Build Termux `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./cmd/9router-go/`: OK (ELF aarch64).
+- Guard de Tailscale: `testing.Testing()` está en `tunnel.go` y no se definió `CAPIMUX_TEST_FAKE_TAILSCALE`. No se usaron APIs pagas, solo `httptest`.
+- CI de #157 en verde: `test` 2m28s, `Integration tests` 49s, `Build Docker image (verify only)` 1m45s.
 
 ## 8. Errores encontrados y corregidos
 
@@ -282,6 +334,7 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 
 ## 12. Riesgos y asuntos pendientes
 
+- #157 (ciclo 5) no depende de nada: se puede mergear en cualquier momento, con merge commit.
 - Orden de merge (ciclo 4): ya se mergearon #145, #146, #147, #151 y #154. Faltan, independientes, #148 y #149, y la cadena #140 → #150 → #152 → #153 → #155 (cambiando la base de #155 a `main`), siempre con merge commit.
 - Pendiente: importación de credenciales con API key (`/api/oauth/codex/bulk-import`, usada por flujos tipo workbuddy). Requiere claves con alcance como #121.
 - Updater:
@@ -293,6 +346,9 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 - Si `requireLogin` está activo y nunca se fijó contraseña, el login sigue aceptando `123456`/`INITIAL_PASSWORD` (paridad upstream).
 - Falta validación física en Termux/Android del APK con este cambio (el APK usa el token CLI, que sigue autorizado).
 
+- Ciclo 5 (#157): `gemini-2.0-flash` sigue clasificado solo como STT, igual que en el registro upstream. Si se quiere ofrecer como chat, es una decisión de catálogo.
+- `fallback.go` tiene una línea en blanco doble preexistente que `gofmt` marca. No se tocó, para mantener el diff mínimo.
+
 ## 13. Participación de otros modelos
 
 Ninguna. Todo el análisis, la implementación y la verificación de este ciclo los hizo Grok Bot localmente; no se consultó ni se atribuye trabajo a otros modelos.
@@ -301,7 +357,9 @@ Ninguna. Todo el análisis, la implementación y la verificación de este ciclo 
 
 Corregidos y verificados: hallazgos 1 y 2 (#145, #146), la gestión de API keys del hallazgo 3 (#148), Kiro social (#147), `-race` en CI (#149) y las fuentes de SHA-256 del updater (#150, sobre #140). Pruebas aisladas de Tailscale real (#145). En el ciclo 3, además, se corrigieron y verificaron el device-code OAuth (#151), el repo renombrado (#152), la release con `sha256s` (#153) y los rate limits con `retry_after` numérico (#154). Nada mergeado.
 
-Siguiente prioridad: que el dueño revise y mergee en el orden indicado. Después:
+Ciclo 5: #157 corrige el fallback de cuentas en cooldown, los reintentos repetidos de los combos sobre la misma cuenta y la clasificación de Gemini 2.5. Está sin mergear y es independiente de la cadena del updater.
+
+Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 puede ir en cualquier momento). Después:
 - claves con alcance para la importación (#121);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
