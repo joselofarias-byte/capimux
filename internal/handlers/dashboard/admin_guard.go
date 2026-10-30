@@ -28,6 +28,9 @@ var authPostureSettingKeys = []string{
 	"samlEntryPoint",
 	"samlIssuer",
 	"samlCert",
+	// Opt-in that lets client API keys add provider credentials; a key must
+	// not be able to grant itself that.
+	auth.ClientCredentialImportSetting,
 }
 
 // isAdminRequest reports whether the caller holds an administrative credential:
