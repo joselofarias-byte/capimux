@@ -148,6 +148,19 @@ func GetStatus() *UpdaterStatus {
 
 // CheckUpdate queries remote version sources (manifest or GitHub Releases API) and compares semver.
 func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
+	// 0. A build that pins a release signing key trusts only the signed
+	// manifest: no fallback to the unsigned sources below (GROK-004 / OPS-01).
+	if info, enforced, err := checkSignedUpdate(ctx); enforced {
+		if err != nil {
+			return nil, err
+		}
+		cacheMu.Lock()
+		cachedInfo = info
+		lastCheckTime = time.Now()
+		cacheMu.Unlock()
+		return info, nil
+	}
+
 	updateURL := lo.CoalesceOrEmpty(os.Getenv("UPDATE_URL"), DefaultUpdateURL)
 
 	// 1. Try manifest URL first
@@ -364,11 +377,14 @@ func matchReleaseAsset(assets []struct {
 }
 
 // PerformSelfUpdate downloads, decompresses (tar.gz/zip if needed), verifies, and safely replaces the active binary.
-// When expectedSHA256 is non-empty, the downloaded asset (after archive extraction) is verified against it before
-// the binary is written to disk; a mismatch aborts the update and keeps the running binary intact.
+// A valid SHA-256 digest is mandatory. The extracted executable is verified before
+// modifying the installed binary; without a digest the update is rejected.
 func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	if downloadURL == "" {
 		return fmt.Errorf("missing download URL for platform %s_%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if err := validateUpdateSHA256(expectedSHA256); err != nil {
+		return err
 	}
 
 	updateProgressMu.Lock()
@@ -418,14 +434,11 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("extract executable: %w", err)
 	}
 
-	// Verify SHA256 checksum when the manifest provides one
-	if expectedSHA256 != "" {
-		actualSHA := ComputeSHA256(binaryBytes)
-		if !strings.EqualFold(actualSHA, expectedSHA256) {
-			return fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA256, actualSHA)
-		}
-		log.Info("updater", "SHA256 checksum verified", "sha256", actualSHA)
+	// A missing, malformed or mismatched checksum must never install an update.
+	if err := verifyUpdateBinarySHA256(binaryBytes, expectedSHA256); err != nil {
+		return err
 	}
+	log.Info("updater", "SHA256 checksum verified", "sha256", ComputeSHA256(binaryBytes))
 
 	// Create temporary binary file in the target directory
 	dir := filepath.Dir(execPath)
