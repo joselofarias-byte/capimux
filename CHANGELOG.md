@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Updater defaults now name the renamed fork `joselofarias-byte/capimux` instead of `joselofarias-byte/9router-go`, so self-update no longer depends on GitHub's rename redirect (which would silently follow any new repository created with the old name). An `UPDATE_REPO`/`UPDATE_URL` that still names the old fork is mapped to the new one; other explicit overrides are untouched. `scripts/bootstrap-codex-audit.sh` uses the new name.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
