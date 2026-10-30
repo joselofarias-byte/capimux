@@ -509,6 +509,60 @@ Batería corrida de verdad sobre cada rama (`/tmp/verify2.sh`, `HOME=/home/box`)
   - después #157 solo necesita confirmar la CI contra el `main` nuevo, sin conflicto esperado.
 - #156 va al final porque documenta el estado de los otros dos. Antes de mergearlo hay que actualizar los SHA si cambian.
 
+### Ciclo 12 — consolidación (autorizada por el dueño, 30/10 19:02 UTC-3)
+
+Confirmado en GitHub: #158, #159, #160, #161 y #162 estaban mergeados (ciclo 10). `main` no tiene protección de rama ni rulesets (`branches/main/protection` → 404 «Branch not protected»; `rulesets` → `[]`), así que ningún merge necesitó una aprobación del dueño. Ningún PR tenía revisiones pedidas.
+
+**Grafo de dependencias:** #140 ⊂ #150 ⊂ #153 ⊂ #155 (#155 tenía base `feat/release-manifest-sha256-20261029`); #152 ⊂ #153. #163, #157, #149, #148 y #156 eran independientes. Solo #148 tenía conflicto con main (`admin_guard.go`, contra #158).
+
+**Método en cada PR:** `git merge origin/main` + push normal; build, `go vet` (también con `-tags=integration`), `go test -count=1 ./...`, `-race` en los paquetes tocados, integración con `-race` y build Termux (`android/arm64`, ELF `03 00 b7 00`); CI verde en el head exacto; `gh pr merge N --merge --match-head-commit <sha>`; después, `go build` + `go test -count=1 ./...` en el main nuevo. En todos los casos el árbol del merge commit en main es idéntico al del head verificado. Sin squash, rebase, force-push ni `--admin`.
+
+| Orden | PR | Head verificado | Merge commit | Hora (UTC-3) | CI en el head |
+|---|---|---|---|---|---|
+| 1 | #163 estrategia de combos | `fa759c44` | `977f3e68` | 19:03 | test, Integration, Docker verify ✓ |
+| 2 | #149 job `-race` + tests de tiempos estabilizados | `db4aac86` | `f236ebb5` | 19:07 | test, race, Integration, Docker ✓ |
+| 3 | #157 fallback/catálogo Gemini 2.5 | `e171bfe2` | `ed2d9060` | 19:10 | test, race, Integration, Docker ✓ |
+| 4 | #148 API key no gestiona API keys | `35a57b00` | `1216426e` | 19:14 | test, race, Integration, Docker ✓ |
+| 5 | #140 OPS-01 manifest firmado | `b25acc97` | `4bc19898` | 19:18 | test, race, Integration, Docker ✓ |
+| 6 | #150 SHA-256 por plataforma | `87d65fa6` | `05da8721` | 19:21 | test, race, Integration, Docker ✓ |
+| 7 | #152 repo `joselofarias-byte/capimux` | `10a17e1a` | `5eceaf89` | 19:24 | test, race, Integration, Docker ✓ |
+| 8 | #153 `version.json` con SHA-256 | `c05d5852` | `4330d6da` | 19:28 | test, race, Integration, Docker ✓ |
+| 9 | #155 imagen en GHCR | `bf43bc31` | `6ee94ceb` | 19:31 | test, race, Integration, Docker ✓ |
+| 10 | #156 este documento | — | (último) | — | — |
+
+**Conflictos resueltos (conservando ambos lados):**
+- #148 `internal/handlers/dashboard/admin_guard.go`: `authPostureSettingKeys` conserva `clientKeyManagementSetting` (#148) y `auth.ClientCredentialImportSetting` (#158).
+- #150 `CHANGELOG.md`: entradas de #150 y de #149.
+- #152 `internal/updater/updater.go`: conserva la verificación firmada de #140 al inicio de `CheckUpdate` y `canonicalUpdateURL(...)` de #152; `CHANGELOG.md` con todas las entradas.
+- #153 `CHANGELOG.md`: unión sin duplicar las entradas de #150/#152 que ya estaban en main.
+
+**Flake nuevo (no estaba en la lista conocida):** en la corrida `-race` de #148, `TestComboRateLimitFailover/429_with_a_brief_retry-after...` falló una vez (el `retryAfter` RFC3339 se trunca a segundos y la espera puede quedar en ~0). #148 no toca `internal/handlers/chat`. Re-corrida de `-race ./internal/handlers/...` verde y 15 corridas `-race` del test en main verdes. Queda anotado como riesgo de tiempos.
+
+**Punto 8 — Gemini 2.0 Flash:** ningún PR ni main lo pone como opción predeterminada. Solo aparece en las listas de modelos de `bluesminds`/`bm` (no en primer lugar), en la lista de `gemini` y en `ProviderModelKinds` como `stt` (no se ofrece como chat). Sin cambios necesarios.
+
+**#140 (OPS-01), completado y mergeado:**
+- Clave pública Ed25519 embebida (`embeddedManifestPublicKeys` en `internal/updater/signed_manifest_trust.go`, vacía hasta que el dueño la provea).
+- Con clave embebida, `CheckUpdate` (auto-update, CLI y endpoint del panel) usa solo `version.signed.json`. Firma ausente, inválida o de otra clave, payload alterado, vencido o clave malformada → error, sin fallback a `version.json` ni a GitHub Releases. Un manifest auténtico con versión igual o menor → «sin actualización».
+- Sin clave embebida el comportamiento anterior no cambia.
+- Pruebas de manipulación en `signed_manifest_tamper_test.go` (claves generadas en el test), con prueba de mutación.
+- Procedimiento OpenSSL para que el dueño genere la clave y firme en `docs/security/GROK-004-OPS-01.md`, probado con una clave descartable.
+- Salió de draft.
+
+**#155 (GHCR):** base cambiada a `main` antes de mergear #153. El workflow publica en `ghcr.io/joselofarias-byte/capimux` (minúsculas), con `permissions: packages: write`, login `registry: ghcr.io` con `GITHUB_TOKEN` y `needs: binaries`. Se agregó: README con la imagen nueva (`luqmenul/9router-go` eliminado), test `TestReleaseWorkflowPublishesToOwnedGHCR` y entrada en CHANGELOG. Paquetes: `gh api /users/joselofarias-byte/packages` responde 403 (al token le falta `read:packages`); el token anónimo de `ghcr.io` para `joselofarias-byte/capimux:pull` es denegado y la página pública de paquetes no muestra ninguno, así que el paquete todavía no existe o no es público. No se publicó nada ni se crearon tags ni releases. El job usa `environment: prod`, que no existe en el repo (hay `Preview` y `Production`): GitHub lo crea sin reglas en la primera corrida.
+
+**#131–#144:** ninguno queda superado por contenido de main (ningún archivo propio es idéntico al de main), así que no se cerró ninguno.
+- #140: integrado.
+- Necesarios (borradores, sin revisar para merge):
+  - #139 DATA-01;
+  - #141 DB-02 (diseño);
+  - #143 estadísticas por solicitud;
+  - #142 failover free-best (toca `combo.go`/`fallback.go`, que cambiaron con #157);
+  - #144 telemetría adaptativa (toca `fallback.go`).
+- Experimentales/WIP: #133 Magnitude y #136 Ultramarine.
+- #131: solo agrega un documento de auditoría.
+- Con dependencia pendiente: #132 y #138, con base `feat/free-best-dynamic-routing` (452 commits detrás de main, en conflicto, y sus PR #14 y #111 cerrados). Hay que cambiarles la base a main antes de evaluarlos.
+- #134, #135 y #137 ya estaban cerrados.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -748,7 +802,12 @@ Ciclo 9: las cinco decisiones del dueño quedaron aplicadas en #161 (decisiones 
 
 Ciclo 10: mergeados con autorización escrita #158, #161, #159, #162 y #160 (SHA en la sección 6, «ciclo 10»). Main queda en `34a2fcd6`, verificado. #163 (persistencia de `strategy`) tiene la CI en verde y queda sin mergear.
 
-Siguiente prioridad (actualizada en el ciclo 11): #163 (`fa759c44`) y #157 (`11f9e378`) verificados, con la CI en verde y a decisión del dueño, en el orden recomendado #163 → #157 → #156 (sección 6, «ciclo 11»). #156 sigue sin mergear. Antes era: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
+Ciclo 12 (consolidación): mergeados en orden #163, #149, #157, #148, #140, #150, #152, #153 y #155 (SHA en la sección 6, «Ciclo 12»); #156 (este documento) va último. Main antes de #156: `6ee94ceb5185ce503cf73d9e796c1c7d057f209d`, verificado. No hubo bloqueos de protección. Pendiente del dueño:
+- generar la clave Ed25519, embeber la pública y firmar `version.signed.json` (`docs/security/GROK-004-OPS-01.md`);
+- tras el primer tag `v*`, decidir si el paquete `ghcr.io/joselofarias-byte/capimux` se hace público;
+- decidir sobre los borradores #131–#144 (clasificación en la sección 6).
+
+Siguiente prioridad (anterior, ciclo 11): #163 (`fa759c44`) y #157 (`11f9e378`) verificados, con la CI en verde y a decisión del dueño, en el orden recomendado #163 → #157 → #156 (sección 6, «ciclo 11»). #156 sigue sin mergear. Antes era: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
 - probar el script de Workbuddy migrado en Termux (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
