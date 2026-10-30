@@ -41,6 +41,8 @@
 
 - Seguridad: una API key de cliente (inferencia) ya no puede desactivar el login del panel, fijar o cambiar su contraseña, cambiar el modo SSO/OIDC/SAML, habilitar el acceso al panel por túnel, reescribir `tunnelUrl`/`tailscaleUrl` ni activar Tailscale/Funnel. Esas acciones exigen sesión de administrador o el token CLI local; con `requireLogin=false` el comportamiento no cambia y los ajustes ordinarios siguen aceptando la API key. Respuesta: HTTP 403 con mensaje en español.
 
+- Updater defaults now name the renamed fork `joselofarias-byte/capimux` instead of `joselofarias-byte/9router-go`, so self-update no longer depends on GitHub's rename redirect (which would silently follow any new repository created with the old name). An `UPDATE_REPO`/`UPDATE_URL` that still names the old fork is mapped to the new one; other explicit overrides are untouched. `scripts/bootstrap-codex-audit.sh` uses the new name.
+
 - Updater: on top of the mandatory SHA-256 from #140, the manifest accepts `sha256s` per platform (`linux_arm64`, `default`, …; the single `sha256` is still honoured), the GitHub releases fallback uses each asset's own `digest: "sha256:…"`, and a digest may describe either the downloaded archive or the extracted executable. Missing, malformed, mismatched or other-platform digests are still refused before the binary is replaced.
 
 - CI (VER-01): nuevo job `race` que ejecuta `go test -race -count=1 ./...` en paralelo con `test`. También se estabiliza `TestGateAcquire_SpacesConcurrentCallers`: el ruido de planificación al medir tras `Acquire` podía achicar un intervalo medido (35,5 ms contra un piso de 40 ms) sin que el gate fallara; ahora cada intervalo exige al menos el 50 % del piso y el lapso total conserva la garantía del 90 %.

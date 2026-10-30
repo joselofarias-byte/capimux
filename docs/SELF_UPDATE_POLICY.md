@@ -5,7 +5,7 @@ This fork carries a validated Fabric control-plane delta on top of upstream `luq
 ## Defaults
 
 - `DefaultUpdateURL` points to this fork's `version.json`.
-- `DefaultGitHubRepo` points to `joselofarias-byte/9router-go`.
+- `DefaultGitHubRepo` points to `joselofarias-byte/capimux` (the fork was renamed from `joselofarias-byte/9router-go`; an `UPDATE_REPO`/`UPDATE_URL` that still names the old repository is mapped to the new one instead of relying on GitHub's rename redirect).
 - The fork manifest intentionally has no default binary download URL until this fork publishes its own release assets.
 - `AUTO_UPDATE` remains off by default.
 
