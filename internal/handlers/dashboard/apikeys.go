@@ -60,6 +60,9 @@ func maskClientKey(key string) string {
 // HandleCreateApiKey handles POST /api/keys.
 // Creates new apiKey (generates uuid if empty, or key if empty sk-...).
 func (h *DashboardHandler) HandleCreateApiKey(w http.ResponseWriter, r *http.Request) {
+	if h.denyClientKeyManagement(w, r, "crear API keys") {
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
@@ -102,6 +105,9 @@ func (h *DashboardHandler) HandleCreateApiKey(w http.ResponseWriter, r *http.Req
 // HandleDeleteApiKey handles DELETE /api/keys/{id}.
 // Deletes client apiKey by ID.
 func (h *DashboardHandler) HandleDeleteApiKey(w http.ResponseWriter, r *http.Request) {
+	if h.denyClientKeyManagement(w, r, "borrar API keys") {
+		return
+	}
 	id := getURLParam(r, "id")
 	if id == "" {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing apiKey id")
@@ -119,6 +125,9 @@ func (h *DashboardHandler) HandleDeleteApiKey(w http.ResponseWriter, r *http.Req
 // HandleToggleApiKey handles PUT /api/keys/{id}/toggle.
 // Toggles isActive flag of client apiKey or sets it to specified boolean if provided.
 func (h *DashboardHandler) HandleToggleApiKey(w http.ResponseWriter, r *http.Request) {
+	if h.denyClientKeyManagement(w, r, "activar o desactivar API keys") {
+		return
+	}
 	id := getURLParam(r, "id")
 	if id == "" {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing apiKey id")

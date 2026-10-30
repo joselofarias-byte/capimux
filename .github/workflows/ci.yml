@@ -78,6 +78,39 @@ jobs:
           }
           go version -m /tmp/9router-go | grep -- '-pgo='
 
+  # VER-01 / CI-01: the unit suite never ran under the race detector, so a data
+  # race in handlers, the proxy executors, usage tracking or the DB layer only
+  # surfaced in production (only the integration suite and multiagent ran with
+  # -race). This job runs every Go package under -race in parallel with `test`
+  # so it adds no wall-clock time to the PR. Locally (2026-10-29) the whole
+  # suite took ~1 min under -race and was clean.
+  race:
+    name: Go race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Several packages embed the dashboard SPA through web/embed.go.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Build Web SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race -count=1 -timeout 20m ./...
+
   # Unit tests exercise handlers with a hand-built router, so they cannot see a
   # regression in the wiring that production actually mounts: a route
   # registered in the wrong group, the /v1 prefix rewrite dropped, the account

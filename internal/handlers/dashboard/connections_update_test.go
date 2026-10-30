@@ -10,6 +10,7 @@ import (
 
 func TestHandleUpdateConnection_AssignedModel(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 

@@ -148,6 +148,19 @@ func GetStatus() *UpdaterStatus {
 
 // CheckUpdate queries remote version sources (manifest or GitHub Releases API) and compares semver.
 func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
+	// 0. A build that pins a release signing key trusts only the signed
+	// manifest: no fallback to the unsigned sources below (GROK-004 / OPS-01).
+	if info, enforced, err := checkSignedUpdate(ctx); enforced {
+		if err != nil {
+			return nil, err
+		}
+		cacheMu.Lock()
+		cachedInfo = info
+		lastCheckTime = time.Now()
+		cacheMu.Unlock()
+		return info, nil
+	}
+
 	updateURL := lo.CoalesceOrEmpty(os.Getenv("UPDATE_URL"), DefaultUpdateURL)
 
 	// 1. Try manifest URL first
