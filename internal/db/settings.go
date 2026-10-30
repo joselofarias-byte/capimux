@@ -308,3 +308,81 @@ func (r *Repo) SetComboStrategy(comboName string, strat ComboStrategy) error {
 		"comboStrategies": currentMap,
 	})
 }
+
+// ValidComboStrategies lists the routing strategies a combo accepts. It
+// matches what the router's applyComboStrategy and the fusion path handle and
+// what the dashboard offers, plus the two aliases they already treat as
+// synonyms ("roundrobin" for round-robin, "first-model" for fallback).
+var ValidComboStrategies = []string{"fallback", "first-model", "round-robin", "roundrobin", "sticky", "capacity", "fusion"}
+
+// IsValidComboStrategy reports whether s is a strategy a combo can be saved with.
+func IsValidComboStrategy(s string) bool {
+	for _, v := range ValidComboStrategies {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+func isTryInOrderStrategy(s string) bool {
+	return s == "" || s == "fallback" || s == "first-model"
+}
+
+// persistComboStrategy writes a combo's routing strategy to
+// settings.comboStrategies, which is where the router and GetCombo* read it.
+// oldName is the combo's name before this write (equal to newName unless the
+// combo is being renamed); its entry moves to newName so a rename keeps the
+// strategy, sticky limit and judge model. An empty strategy only performs that
+// move. fresh starts from an empty entry (a new combo must not inherit a stale
+// entry left behind under the same name).
+//
+// A try-in-order strategy with no sticky limit or judge model drops the entry,
+// as the dashboard does, unless a global comboStrategy is set: then the entry
+// is kept so the combo keeps reading back as the strategy it was saved with.
+func (r *Repo) persistComboStrategy(oldName, newName, strategy string, fresh bool) error {
+	raw, err := r.GetSettingsRaw()
+	if err != nil || raw == nil {
+		raw = make(map[string]any)
+	}
+	currentMap := map[string]any{}
+	if cs, ok := raw["comboStrategies"].(map[string]any); ok {
+		for k, v := range cs {
+			currentMap[k] = v
+		}
+	}
+
+	entry := map[string]any{}
+	if !fresh {
+		if existing, ok := currentMap[oldName].(map[string]any); ok {
+			for k, v := range existing {
+				entry[k] = v
+			}
+		}
+	}
+	if oldName != newName {
+		delete(currentMap, oldName)
+	}
+	if strategy != "" {
+		entry["strategy"] = strategy
+		entry["fallbackStrategy"] = strategy
+	}
+
+	effective := handlerutil.GetString(entry, "strategy")
+	if effective == "" {
+		effective = handlerutil.GetString(entry, "fallbackStrategy")
+	}
+	_, hasSticky := entry["stickyLimit"]
+	_, hasStickyRR := entry["stickyRoundRobinLimit"]
+	judge := handlerutil.GetString(entry, "judgeModel")
+	global := handlerutil.GetString(raw, "comboStrategy")
+	if len(entry) == 0 || (isTryInOrderStrategy(effective) && !hasSticky && !hasStickyRR && judge == "" && isTryInOrderStrategy(global)) {
+		delete(currentMap, newName)
+	} else {
+		currentMap[newName] = entry
+	}
+
+	return r.UpdateSettingsRaw(map[string]any{
+		"comboStrategies": currentMap,
+	})
+}
