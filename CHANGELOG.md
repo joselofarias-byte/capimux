@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Updater: on top of the mandatory SHA-256 from #140, the manifest accepts `sha256s` per platform (`linux_arm64`, `default`, …; the single `sha256` is still honoured), the GitHub releases fallback uses each asset's own `digest: "sha256:…"`, and a digest may describe either the downloaded archive or the extracted executable. Missing, malformed, mismatched or other-platform digests are still refused before the binary is replaced.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
