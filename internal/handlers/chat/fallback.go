@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -783,32 +784,56 @@ func extractRetryAfter(body []byte) string {
 	if dur, ok := extractResetDuration(body); ok {
 		return time.Now().UTC().Add(dur).Format(time.RFC3339)
 	}
+	// Each field may be a string (RFC3339, "120s", "120") or a bare JSON
+	// number of seconds. Typed as string, a single numeric field made the
+	// whole decode fail, so every wait in the body was lost, including the
+	// error.retry_after/reset_at pair this router itself sends to clients
+	// (a chained Capimux/9router upstream).
 	var parsed struct {
-		RetryAfter string `json:"retryAfter"`
-		RetryAlt   string `json:"retry_after"`
-		ResetsAt   string `json:"resetsAt"`
-		ResetsAlt  string `json:"resets_at"`
+		RetryAfter any `json:"retryAfter"`
+		RetryAlt   any `json:"retry_after"`
+		ResetsAt   any `json:"resetsAt"`
+		ResetsAlt  any `json:"resets_at"`
 		Error      struct {
-			RetryAfter string `json:"retryAfter"`
+			RetryAfter any `json:"retryAfter"`
+			RetryAlt   any `json:"retry_after"`
+			ResetAt    any `json:"reset_at"`
+			ResetsAt   any `json:"resetsAt"`
+			ResetsAlt  any `json:"resets_at"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return ""
 	}
-	if parsed.RetryAfter != "" {
-		return parsed.RetryAfter
+	for _, v := range []any{
+		parsed.RetryAfter, parsed.RetryAlt, parsed.ResetsAt, parsed.ResetsAlt,
+		parsed.Error.RetryAfter, parsed.Error.RetryAlt, parsed.Error.ResetAt, parsed.Error.ResetsAt, parsed.Error.ResetsAlt,
+	} {
+		if s := retryFieldString(v); s != "" {
+			return s
+		}
 	}
-	if parsed.RetryAlt != "" {
-		return parsed.RetryAlt
-	}
-	if parsed.ResetsAt != "" {
-		return parsed.ResetsAt
-	}
-	if parsed.ResetsAlt != "" {
-		return parsed.ResetsAlt
-	}
-	if parsed.Error.RetryAfter != "" {
-		return parsed.Error.RetryAfter
+	return ""
+}
+
+// retryFieldString normalises one retry/reset field to the string forms
+// parseRetryAfterValue reads. A number is seconds; zero, negative,
+// NaN carry no usable wait, and a huge one is held to maxResetCooldown.
+func retryFieldString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case float64:
+		if !(t > 0) {
+			return ""
+		}
+		// Clamped like every other cooldown; it also keeps the int64
+		// conversion below from overflowing.
+		t = min(t, maxResetCooldown.Seconds())
+		if t == math.Trunc(t) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64) + "s"
 	}
 	return ""
 }

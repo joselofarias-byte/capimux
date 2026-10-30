@@ -659,6 +659,13 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 		}
 	}
 
+	if h.requiresAdminForPosture(r) {
+		if key, changed := changedConnectionDestination(existing.Data, dataStr); changed {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar el destino de una conexión ("+key+")"))
+			return
+		}
+	}
+
 	if err := h.Repo.UpdateProviderConnection(id, name, priority, isActive, dataStr); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
