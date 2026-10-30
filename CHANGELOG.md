@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+- OAuth device-code flows (Qoder, Kilo Code, Grok CLI, GitHub/Copilot, Kiro, Kimi, CodeBuddy, Muse) now pass the dashboard request context to every upstream call. Closing the login modal or shutting down cancels them, and each start/poll request has an overall 60 s budget. Muse's 429 key-mint backoff also stops on cancellation instead of sleeping up to 15 s.
+
 
 - Fiabilidad (OAuth-01, parcial): el intercambio social de Kiro (`POST /api/oauth/kiro/social-exchange`) ya no usa `http.Post` sin timeout; ahora respeta la cancelación de la petición del panel y usa el cliente OAuth con timeout de 15 s y reintento directo ante proxies que rechazan CONNECT. Un host de autenticación colgado ya no deja el handler esperando para siempre.
 
