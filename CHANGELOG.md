@@ -1,6 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+- Rate limits: a 429 whose wait is a JSON number in the body (`retry_after: 30`, `retryAfter`, `error.retry_after`, the `error.retry_after`/`reset_at` pair this router itself sends, i.e. a chained Capimux/9router upstream) parks the account for that window. Previously one numeric field made the whole decode fail, the wait was lost and the exhausted account came back after the 2s base backoff. A huge delta-seconds (header or body) no longer overflows into "no wait"; it is held to the 2h cooldown cap.
+
+- OAuth device-code flows (Qoder, Kilo Code, Grok CLI, GitHub/Copilot, Kiro, Kimi, CodeBuddy, Muse) now pass the dashboard request context to every upstream call. Closing the login modal or shutting down cancels them, and each start/poll request has an overall 60 s budget. Muse's 429 key-mint backoff also stops on cancellation instead of sleeping up to 15 s.
+
+
+- Fiabilidad (OAuth-01, parcial): el intercambio social de Kiro (`POST /api/oauth/kiro/social-exchange`) ya no usa `http.Post` sin timeout; ahora respeta la cancelación de la petición del panel y usa el cliente OAuth con timeout de 15 s y reintento directo ante proxies que rechazan CONNECT. Un host de autenticación colgado ya no deja el handler esperando para siempre.
+
+- Seguridad: una API key de cliente ya no puede cambiar el destino de credenciales existentes: `baseUrl`, proxy por conexión (`connectionProxy*`, `strictProxy`), `vercelRelayUrl`, vínculo a proxy pool y cualquier otro campo `*Url`/`*Endpoint` de una conexión, la URL base de un nodo de proveedor ni las URLs/tipo de un proxy pool. Sesión de administrador o token CLI local siguen pudiendo; renombrar, activar, reordenar o asignar modelo con la API key sigue funcionando. Respuesta: HTTP 403 con mensaje en español.
+
+- Seguridad: una API key de cliente (inferencia) ya no puede desactivar el login del panel, fijar o cambiar su contraseña, cambiar el modo SSO/OIDC/SAML, habilitar el acceso al panel por túnel, reescribir `tunnelUrl`/`tailscaleUrl` ni activar Tailscale/Funnel. Esas acciones exigen sesión de administrador o el token CLI local; con `requireLogin=false` el comportamiento no cambia y los ajustes ordinarios siguen aceptando la API key. Respuesta: HTTP 403 con mensaje en español.
 
 - Releases now publish an update manifest the mandatory-hash updater can actually install from: `release.yml` checks `SHA256SUMS.txt`, runs `go run ./cmd/release-manifest` to write `version.json` (one `downloadUrls`/`sha256s` entry per platform, cross-checked against `SHA256SUMS.txt`), and uploads it with the binaries. `make cross` also builds `android-arm64`, so Termux can self-update. The fork's default manifest is now `releases/latest/download/version.json`; the raw `main` manifest and the old repository's manifest map to it. A repository with no published release answers "up to date" instead of reporting a failed check. The generator refuses a non-tag version, plain http, unknown file names, two binaries for one platform, and any hash that disagrees with `SHA256SUMS.txt`, so the job fails rather than publishing a release the updater would refuse.
 

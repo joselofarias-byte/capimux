@@ -68,6 +68,7 @@ func TestHandleUpdateSettings_PasswordChange(t *testing.T) {
 
 	// First-time password set: no current password required.
 	req = httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"newPassword":"s3cret-pass","currentPassword":""}`))
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -103,6 +104,7 @@ func TestHandleUpdateSettings_PasswordChange(t *testing.T) {
 
 	// Wrong current password is rejected.
 	req = httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"newPassword":"other","currentPassword":"nope"}`))
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -111,6 +113,7 @@ func TestHandleUpdateSettings_PasswordChange(t *testing.T) {
 
 	// Correct current password rotates the hash.
 	req = httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"newPassword":"rotated-pass","currentPassword":"s3cret-pass"}`))
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

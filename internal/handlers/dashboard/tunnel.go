@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"9router/proxy/internal/config"
@@ -33,12 +34,40 @@ var unixTailscaleCandidates = []string{
 // state that daemon happens to be in and, via `tailscale up --reset`, mutates
 // it.
 var (
-	tailscaleBinFn = findTailscaleBin
-	tailscaleExec  = func(ctx context.Context, bin string, args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, bin, args...).CombinedOutput()
-	}
+	tailscaleBinFn = defaultTailscaleBin
+	tailscaleExec  = defaultTailscaleExec
 )
 
+// FakeTailscaleEnv names the only tailscale executable a test binary may run.
+// Tests that need the real exec path point it at a fake script.
+const FakeTailscaleEnv = "CAPIMUX_TEST_FAKE_TAILSCALE"
+
+// errRealTailscaleInTest is what a test gets instead of the host's tailscale.
+var errRealTailscaleInTest = errors.New("tailscale real bloqueado: los tests nunca ejecutan el binario tailscale del host (usar " + FakeTailscaleEnv + " o stubTailscaleHost)")
+
+// defaultTailscaleBin never resolves the host's tailscale inside a test
+// binary: only the fake named by FakeTailscaleEnv (or none). On 2026-10-29 a
+// router-level test reached HandleTailscaleEnable and ran `tailscale funnel
+// --bg reset` on the developer machine; this keeps that from recurring even in
+// packages that cannot reach the seams above.
+func defaultTailscaleBin() string {
+	if testing.Testing() {
+		return os.Getenv(FakeTailscaleEnv)
+	}
+	return findTailscaleBin()
+}
+
+// defaultTailscaleExec runs the CLI. Inside a test binary anything but the
+// configured fake panics, so a regression fails the test loudly instead of
+// touching the host's tailnet (serve/funnel/up --reset).
+func defaultTailscaleExec(ctx context.Context, bin string, args ...string) ([]byte, error) {
+	if testing.Testing() {
+		if fake := os.Getenv(FakeTailscaleEnv); fake == "" || bin != fake {
+			panic(fmt.Sprintf("%v: bin=%q args=%q", errRealTailscaleInTest, bin, args))
+		}
+	}
+	return exec.CommandContext(ctx, bin, args...).CombinedOutput()
+}
 
 // findTailscaleBin searches for the tailscale executable across PATH and well-known locations.
 func findTailscaleBin() string {
@@ -212,6 +241,13 @@ func (h *DashboardHandler) HandleTailscaleCheck(w http.ResponseWriter, r *http.R
 // HandleTailscaleEnable handles POST /api/tunnel/tailscale-enable.
 // Mirrors upstream enableTailscale: verifies login, triggers login flow if needed, and starts background Funnel.
 func (h *DashboardHandler) HandleTailscaleEnable(w http.ResponseWriter, r *http.Request) {
+	// Enabling Tailscale runs `tailscale up --reset` (whose login URL is handed
+	// back to the caller) and starts a public Funnel. A client API key must not
+	// be able to enrol the host into a tailnet or publish it to the internet.
+	if h.requiresAdminForPosture(r) {
+		writePlainError(w, http.StatusForbidden, adminRequiredMessage("activar Tailscale/Funnel"))
+		return
+	}
 	bin := tailscaleBinFn()
 	if bin == "" {
 		writePlainError(w, http.StatusBadRequest, "Tailscale CLI is not installed or detected on your system path")
@@ -308,6 +344,12 @@ func (h *DashboardHandler) HandleTailscaleEnable(w http.ResponseWriter, r *http.
 // HandleTailscaleDisable handles POST /api/tunnel/tailscale-disable.
 // Mirrors upstream disableTailscale: resets background funnel and clears settings.
 func (h *DashboardHandler) HandleTailscaleDisable(w http.ResponseWriter, r *http.Request) {
+	// Also a host command (`tailscale funnel --bg reset`) that cuts the
+	// owner's remote access: not something a client API key may trigger.
+	if h.requiresAdminForPosture(r) {
+		writePlainError(w, http.StatusForbidden, adminRequiredMessage("desactivar Tailscale/Funnel"))
+		return
+	}
 	bin := tailscaleBinFn()
 	if bin != "" {
 		_, _ = tailscaleExec(context.Background(), bin, "funnel", "--bg", "reset")
