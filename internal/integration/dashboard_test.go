@@ -6,9 +6,25 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samber/lo"
+
+	"9router/proxy/internal/auth"
 )
+
+// operator authenticates as the dashboard owner (session cookie, no API key).
+// Creating or replacing provider credentials is an owner action: a client API
+// key may not overwrite them and creates them only after the owner opts in
+// with allowClientCredentialImport.
+func operator(t *testing.T) []RequestOpt {
+	t.Helper()
+	session, err := auth.Sign(auth.Secret(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []RequestOpt{WithoutAPIKey(), WithHeader("Cookie", auth.CookieName+"="+session)}
+}
 
 // connectionRow is the sanitized shape GET /api/connections returns. The
 // dashboard reads it; the important part is that apiKey never appears, since
@@ -59,7 +75,7 @@ func TestConnectionLifecycle(t *testing.T) {
 		"name":     "DeepSeek Primary",
 		"apiKey":   "sk-deepseek-secret",
 		"priority": 1,
-	})
+	}, operator(t)...)
 	if created.Status != http.StatusOK {
 		t.Fatalf("POST /api/connections = %d, want 200 (body: %s)", created.Status, truncate(created.Body))
 	}
@@ -129,7 +145,7 @@ func TestConnectionNameConflictIsRefused(t *testing.T) {
 
 	first := env.Post(t, "/api/connections", map[string]any{
 		"provider": "deepseek", "authType": "apikey", "name": "Primary", "apiKey": "sk-first",
-	})
+	}, operator(t)...)
 	if first.Status != http.StatusOK {
 		t.Fatalf("first POST /api/connections = %d, want 200 (body: %s)", first.Status, truncate(first.Body))
 	}
@@ -141,7 +157,7 @@ func TestConnectionNameConflictIsRefused(t *testing.T) {
 	t.Run("duplicate name is a 409", func(t *testing.T) {
 		second := env.Post(t, "/api/connections", map[string]any{
 			"provider": "deepseek", "authType": "apikey", "name": "Primary", "apiKey": "sk-second",
-		})
+		}, operator(t)...)
 		if second.Status != http.StatusConflict {
 			t.Fatalf("duplicate POST /api/connections = %d, want 409 (body: %s)", second.Status, truncate(second.Body))
 		}
@@ -158,11 +174,29 @@ func TestConnectionNameConflictIsRefused(t *testing.T) {
 		}
 	})
 
+	t.Run("a client API key cannot overwrite or add", func(t *testing.T) {
+		for _, body := range []map[string]any{
+			{"provider": "deepseek", "authType": "apikey", "name": "Primary", "apiKey": "sk-attacker", "allowOverwrite": true},
+			{"provider": "deepseek", "authType": "apikey", "name": "Extra", "apiKey": "sk-attacker"},
+		} {
+			if res := env.Post(t, "/api/connections", body); res.Status != http.StatusForbidden {
+				t.Fatalf("API key POST %v = %d, want 403 (body: %s)", body, res.Status, truncate(res.Body))
+			}
+		}
+		if res := env.Put(t, "/api/connections/"+firstResp.ID, map[string]any{"data": map[string]any{"apiKey": "sk-attacker"}}); res.Status != http.StatusForbidden {
+			t.Fatalf("API key PUT apiKey = %d, want 403 (body: %s)", res.Status, truncate(res.Body))
+		}
+		count := lo.CountBy(listConnections(t, env), func(r connectionRow) bool { return r.Provider == "deepseek" })
+		if count != 1 {
+			t.Errorf("deepseek connections = %d, want 1", count)
+		}
+	})
+
 	t.Run("allowOverwrite replaces in place", func(t *testing.T) {
 		res := env.Post(t, "/api/connections", map[string]any{
 			"provider": "deepseek", "authType": "apikey", "name": "Primary",
 			"apiKey": "sk-second", "allowOverwrite": true,
-		})
+		}, operator(t)...)
 		if res.Status != http.StatusOK {
 			t.Fatalf("overwrite POST /api/connections = %d, want 200 (body: %s)", res.Status, truncate(res.Body))
 		}
