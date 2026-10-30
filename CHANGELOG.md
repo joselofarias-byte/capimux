@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fiabilidad (OAuth-01, parcial): el intercambio social de Kiro (`POST /api/oauth/kiro/social-exchange`) ya no usa `http.Post` sin timeout; ahora respeta la cancelación de la petición del panel y usa el cliente OAuth con timeout de 15 s y reintento directo ante proxies que rechazan CONNECT. Un host de autenticación colgado ya no deja el handler esperando para siempre.
+
 - Seguridad: una API key de cliente ya no puede cambiar el destino de credenciales existentes: `baseUrl`, proxy por conexión (`connectionProxy*`, `strictProxy`), `vercelRelayUrl`, vínculo a proxy pool y cualquier otro campo `*Url`/`*Endpoint` de una conexión, la URL base de un nodo de proveedor ni las URLs/tipo de un proxy pool. Sesión de administrador o token CLI local siguen pudiendo; renombrar, activar, reordenar o asignar modelo con la API key sigue funcionando. Respuesta: HTTP 403 con mensaje en español.
 
 - Seguridad: una API key de cliente (inferencia) ya no puede desactivar el login del panel, fijar o cambiar su contraseña, cambiar el modo SSO/OIDC/SAML, habilitar el acceso al panel por túnel, reescribir `tunnelUrl`/`tailscaleUrl` ni activar Tailscale/Funnel. Esas acciones exigen sesión de administrador o el token CLI local; con `requireLogin=false` el comportamiento no cambia y los ajustes ordinarios siguen aceptando la API key. Respuesta: HTTP 403 con mensaje en español.
