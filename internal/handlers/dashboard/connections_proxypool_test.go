@@ -40,6 +40,8 @@ func TestHandleUpdateConnection_ProxyPoolBinding(t *testing.T) {
 	put := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPut, "/api/connections/"+connID, bytes.NewReader([]byte(body)))
 		req.Header.Set("Content-Type", "application/json")
+		// The dashboard owner edits destinations; a client API key may not.
+		asDashboardAdmin(t, req)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
