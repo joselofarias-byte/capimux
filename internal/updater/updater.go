@@ -222,6 +222,11 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 		DownloadURLs  map[string]string `json:"downloadUrls"`
 		ReleaseNotes  string            `json:"releaseNotes"`
 		SHA256        string            `json:"sha256"`
+		// SHA256s carries one digest per platform key (e.g. "linux_arm64"),
+		// matching downloadUrls. A single top-level sha256 cannot describe
+		// several platform binaries, so with mandatory verification every
+		// platform but one would be refused.
+		SHA256s map[string]string `json:"sha256s"`
 	}
 	if err := json.Unmarshal(body, &remote); err != nil {
 		return nil, err
@@ -257,6 +262,14 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 	if downloadURL == "" {
 		downloadURL = remote.DownloadURL
 	}
+	expectedSHA := remote.SHA256
+	if remote.SHA256s != nil {
+		if v := remote.SHA256s[platformKey]; v != "" {
+			expectedSHA = v
+		} else if v := remote.SHA256s["default"]; v != "" {
+			expectedSHA = v
+		}
+	}
 
 	return &UpdateInfo{
 		CurrentVersion: CurrentVersion,
@@ -268,7 +281,7 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 		CheckedAt:      time.Now().UTC().Format(time.RFC3339),
-		SHA256:         remote.SHA256,
+		SHA256:         expectedSHA,
 		Source:         "manifest",
 	}, nil
 }
@@ -299,11 +312,20 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 		Assets  []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
+			// Digest is GitHub's own "sha256:<hex>" of the uploaded asset.
+			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
 
 	if err := json.UnmarshalRead(resp.Body, &release); err != nil {
 		return nil, err
+	}
+	matchable := make([]struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	}, len(release.Assets))
+	for i, a := range release.Assets {
+		matchable[i].Name, matchable[i].BrowserDownloadURL = a.Name, a.BrowserDownloadURL
 	}
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
@@ -314,7 +336,14 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 		latestVersion = current
 	}
 
-	downloadURL := matchReleaseAsset(release.Assets, runtime.GOOS, runtime.GOARCH)
+	downloadURL := matchReleaseAsset(matchable, runtime.GOOS, runtime.GOARCH)
+	assetSHA := ""
+	for _, a := range release.Assets {
+		if a.BrowserDownloadURL == downloadURL && strings.HasPrefix(strings.ToLower(a.Digest), "sha256:") {
+			assetSHA = strings.ToLower(strings.TrimPrefix(strings.ToLower(a.Digest), "sha256:"))
+			break
+		}
+	}
 
 	return &UpdateInfo{
 		CurrentVersion: CurrentVersion,
@@ -326,6 +355,7 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 		CheckedAt:      time.Now().UTC().Format(time.RFC3339),
+		SHA256:         assetSHA,
 		Source:         "github_releases",
 	}, nil
 }
@@ -428,17 +458,11 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("read downloaded asset: %w", err)
 	}
 
-	// Extract executable bytes from archive or raw binary
-	binaryBytes, err := extractExecutableBytes(rawBytes, downloadURL)
+	binaryBytes, archiveVerified, err := verifyDownloadedUpdate(rawBytes, downloadURL, expectedSHA256)
 	if err != nil {
-		return fmt.Errorf("extract executable: %w", err)
-	}
-
-	// A missing, malformed or mismatched checksum must never install an update.
-	if err := verifyUpdateBinarySHA256(binaryBytes, expectedSHA256); err != nil {
 		return err
 	}
-	log.Info("updater", "SHA256 checksum verified", "sha256", ComputeSHA256(binaryBytes))
+	log.Info("updater", "SHA256 checksum verified", "sha256", ComputeSHA256(binaryBytes), "archive", archiveVerified)
 
 	// Create temporary binary file in the target directory
 	dir := filepath.Dir(execPath)
@@ -477,6 +501,29 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	_ = os.Remove(oldPath)
 	log.Info("updater", "self-update applied successfully!", "binary", execPath)
 	return nil
+}
+
+// verifyDownloadedUpdate returns the executable to install only when
+// expectedSHA256 is a valid digest of either the downloaded asset (GitHub's
+// asset digest or a published archive checksum) or the executable extracted
+// from it (the manifest contract). The downloaded bytes are checked first so
+// that, when the digest describes the archive, only a verified archive is
+// parsed. A missing, malformed or mismatched checksum never yields bytes.
+func verifyDownloadedUpdate(rawBytes []byte, downloadURL, expectedSHA256 string) ([]byte, bool, error) {
+	if err := validateUpdateSHA256(expectedSHA256); err != nil {
+		return nil, false, err
+	}
+	archiveVerified := verifyUpdateBinarySHA256(rawBytes, expectedSHA256) == nil
+	binaryBytes, err := extractExecutableBytes(rawBytes, downloadURL)
+	if err != nil {
+		return nil, false, fmt.Errorf("extract executable: %w", err)
+	}
+	if !archiveVerified {
+		if err := verifyUpdateBinarySHA256(binaryBytes, expectedSHA256); err != nil {
+			return nil, false, err
+		}
+	}
+	return binaryBytes, archiveVerified, nil
 }
 
 // extractExecutableBytes handles .tar.gz, .zip, and raw binaries.

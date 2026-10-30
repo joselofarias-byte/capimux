@@ -41,6 +41,8 @@
 
 - Seguridad: una API key de cliente (inferencia) ya no puede desactivar el login del panel, fijar o cambiar su contraseña, cambiar el modo SSO/OIDC/SAML, habilitar el acceso al panel por túnel, reescribir `tunnelUrl`/`tailscaleUrl` ni activar Tailscale/Funnel. Esas acciones exigen sesión de administrador o el token CLI local; con `requireLogin=false` el comportamiento no cambia y los ajustes ordinarios siguen aceptando la API key. Respuesta: HTTP 403 con mensaje en español.
 
+- Updater: on top of the mandatory SHA-256 from #140, the manifest accepts `sha256s` per platform (`linux_arm64`, `default`, …; the single `sha256` is still honoured), the GitHub releases fallback uses each asset's own `digest: "sha256:…"`, and a digest may describe either the downloaded archive or the extracted executable. Missing, malformed, mismatched or other-platform digests are still refused before the binary is replaced.
+
 - CI (VER-01): nuevo job `race` que ejecuta `go test -race -count=1 ./...` en paralelo con `test`. También se estabiliza `TestGateAcquire_SpacesConcurrentCallers`: el ruido de planificación al medir tras `Acquire` podía achicar un intervalo medido (35,5 ms contra un piso de 40 ms) sin que el gate fallara; ahora cada intervalo exige al menos el 50 % del piso y el lapso total conserva la garantía del 90 %.
 
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
