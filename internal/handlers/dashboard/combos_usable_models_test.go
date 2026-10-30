@@ -100,7 +100,7 @@ func TestAutoFreeComboSkipsInactiveConnectionsAndDisabledModels(t *testing.T) {
 	router := setupTestRouter(repo)
 
 	// Only connection disabled: nothing reachable.
-	seedConnection(t, repo.RawDB(), "bazaarlink")
+	seedConnection(t, repo.RawDB(), "opencode")
 	if _, err := repo.RawDB().Exec(`UPDATE providerConnections SET isActive = 0`); err != nil {
 		t.Fatal(err)
 	}
@@ -108,19 +108,20 @@ func TestAutoFreeComboSkipsInactiveConnectionsAndDisabledModels(t *testing.T) {
 		t.Fatalf("inactive-only connection: expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Active again, but the only free model is disabled on the provider page.
+	// Active again, but one of the two free models is disabled on the
+	// provider page: one model is not a fallback chain.
 	if _, err := repo.RawDB().Exec(`UPDATE providerConnections SET isActive = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.SetKV("disabledModels", "bzl", `["auto:free"]`); err != nil {
+	if err := repo.SetKV("disabledModels", "oc", `["muse-spark-1.2-contributor-free"]`); err != nil {
 		t.Fatal(err)
 	}
 	if rec := postJSON(t, router, "/api/combos/auto-free", nil); rec.Code != http.StatusConflict {
-		t.Fatalf("disabled free model: expected 409, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("one free model left: expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Re-enabled: the combo is built again.
-	if err := repo.SetKV("disabledModels", "bzl", `[]`); err != nil {
+	if err := repo.SetKV("disabledModels", "oc", `[]`); err != nil {
 		t.Fatal(err)
 	}
 	if rec := postJSON(t, router, "/api/combos/auto-free", nil); rec.Code != http.StatusOK {
@@ -130,7 +131,7 @@ func TestAutoFreeComboSkipsInactiveConnectionsAndDisabledModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"bzl/auto:free"}; !slices.Equal(members, want) {
-		t.Errorf("members = %v, want %v", members, want)
+	if len(members) != 2 || !slices.Contains(members, ocFreeModels[0]) || !slices.Contains(members, ocFreeModels[1]) {
+		t.Errorf("members = %v, want %v", members, ocFreeModels)
 	}
 }

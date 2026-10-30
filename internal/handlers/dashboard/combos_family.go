@@ -61,14 +61,27 @@ func (h *DashboardHandler) HandleAutoFamilyCombos(w http.ResponseWriter, r *http
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if err := h.markGenerated(id, autoFamilyComboKind, name, members, "fallback"); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		created = append(created, family)
 	}
 	sort.Strings(created)
+
+	// Generated combos whose family dropped below two usable models are
+	// removed; combos the user edited are kept and flagged in GET /api/combos.
+	pruned, err := h.pruneGeneratedCombos(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"created": created,
 		"count":   len(created),
+		"pruned":  pruned,
 	})
 }
 

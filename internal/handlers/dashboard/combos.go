@@ -27,7 +27,23 @@ func (h *DashboardHandler) HandleGetCombos(w http.ResponseWriter, r *http.Reques
 	if combos == nil {
 		combos = []*models.Combo{}
 	}
-	handlerutil.WriteJSON(w, http.StatusOK, combos)
+	// Each combo also carries read-only review fields: generated,
+	// needsReview, reviewReason and unavailableModels (additive).
+	reviews, err := h.comboReviews(combos)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(combos))
+	for _, c := range combos {
+		m, err := comboWithReview(c, reviews[c.ID])
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, m)
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, out)
 }
 
 // HandleCreateCombo handles POST /api/combos.
@@ -186,9 +202,19 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if len(models) == 0 {
-		handlerutil.WriteJSONError(w, http.StatusConflict,
-			"no free-tier models found among providers with connections")
+	if len(models) < minFamilyMembers {
+		// A fallback chain needs two models. Prune the generated combo if it
+		// is still untouched; a combo the user edited stays and is flagged.
+		pruned, perr := h.pruneGeneratedCombos(r.Context())
+		if perr != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, perr.Error())
+			return
+		}
+		handlerutil.WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":  fmt.Sprintf("Se necesitan al menos dos modelos gratuitos disponibles (proveedor con conexión activa y modelo habilitado) para el combo Auto Free Tier; hay %d.", len(models)),
+			"count":  len(models),
+			"pruned": pruned,
+		})
 		return
 	}
 
@@ -213,11 +239,21 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := h.markGenerated(AutoFreeComboID, autoFreeComboKind, name, models, "fallback"); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pruned, err := h.pruneGeneratedCombos(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"id":     AutoFreeComboID,
 		"models": models,
+		"pruned": pruned,
 	})
 }
 
@@ -311,6 +347,7 @@ func (h *DashboardHandler) HandleDeleteCombo(w http.ResponseWriter, r *http.Requ
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = h.Repo.DeleteKV(generatedCombosScope, id)
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
 }
