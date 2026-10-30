@@ -66,6 +66,10 @@ func (a *ModelsDevAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 	}
 
 	var candidates []Candidate
+	// Several upstream ids collapse to one base id (a gateway's ":free" lane
+	// next to its paid model, or one model from several vendors). Keep one
+	// candidate per provider+base, chosen independently of map order.
+	byBase := make(map[string]int)
 	now := time.Now().UTC()
 
 	for provID, provData := range rawData {
@@ -105,7 +109,7 @@ func (a *ModelsDevAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 				}
 			}
 
-			candidates = append(candidates, Candidate{
+			c := Candidate{
 				SourceID:      a.SourceID(),
 				Provenance:    "https://models.dev API",
 				Confidence:    0.8, // Good but still third-party aggregate
@@ -115,10 +119,31 @@ func (a *ModelsDevAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 				UpstreamModel: modelID,
 				PricingMode:   pricingMode,
 				Capabilities:  string(capsBytes),
-			})
+			}
+			key := provID + "\x00" + base
+			if i, dup := byBase[key]; dup {
+				if preferModelsDevVariant(c, candidates[i]) {
+					candidates[i] = c
+				}
+				continue
+			}
+			byBase[key] = len(candidates)
+			candidates = append(candidates, c)
 		}
 	}
 
 	log.Info("discovery", "models.dev sync complete", "candidates", len(candidates))
 	return candidates, nil
+}
+
+// preferModelsDevVariant reports whether c should replace kept for the same
+// provider and base id. An explicit free lane wins, so free routing keeps the
+// ":free" upstream and never falls through to the paid id; otherwise the
+// lexicographically smallest upstream id wins, so every sync picks the same one.
+func preferModelsDevVariant(c, kept Candidate) bool {
+	cFree, keptFree := c.PricingMode == "free", kept.PricingMode == "free"
+	if cFree != keptFree {
+		return cFree
+	}
+	return c.UpstreamModel < kept.UpstreamModel
 }

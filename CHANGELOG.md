@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+- Descubrimiento free (models.dev): cuando varias entradas de un proveedor se reducen al mismo id base (el carril `:free` de un gateway junto a su modelo pago, o un mismo modelo de varios vendors), el adaptador ahora emite una sola candidata elegida de forma determinista: gana la variante gratis explícita y, si no, el id upstream menor. Antes emitía todas y el orquestador se quedaba con la última según el orden aleatorio de los mapas de Go, así que los carriles gratis de OpenRouter entraban y salían del pool free en cada sincronización (con el catálogo real: 489 candidatas duplicadas; entre 9 y 12 de 17 modelos free de OpenRouter quedaban clasificados como free según la corrida).
+
 - Rate limits: a 429 whose wait is a JSON number in the body (`retry_after: 30`, `retryAfter`, `error.retry_after`, the `error.retry_after`/`reset_at` pair this router itself sends, i.e. a chained Capimux/9router upstream) parks the account for that window. Previously one numeric field made the whole decode fail, the wait was lost and the exhausted account came back after the 2s base backoff. A huge delta-seconds (header or body) no longer overflows into "no wait"; it is held to the 2h cooldown cap.
 
 - OAuth device-code flows (Qoder, Kilo Code, Grok CLI, GitHub/Copilot, Kiro, Kimi, CodeBuddy, Muse) now pass the dashboard request context to every upstream call. Closing the login modal or shutting down cancels them, and each start/poll request has an overall 60 s budget. Muse's 429 key-mint backoff also stops on cancellation instead of sleeping up to 15 s.
