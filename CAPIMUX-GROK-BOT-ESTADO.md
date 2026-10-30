@@ -454,6 +454,61 @@ Bug de strategy: PR independiente, **sin mergear**: #163 `fix/combo-strategy-per
 - Batería completa en la rama: todo OK (incluidos el 403 y el 409, Termux `b7`) y `bun test` 117/117.
 - CI #163 en verde a la primera: test 1m55s, Integration 1m11s, Docker verify 1m47s.
 
+### Verificación de la cola restante (ciclo 11, 30/10, UTC-3)
+
+`main` = `34a2fcd6`. Merges de #158 a #162, por orden, con su merge commit:
+
+| PR | Merge commit |
+|---|---|
+| #158 | `bf15b250` |
+| #161 | `3bc3929b` |
+| #159 | `522d683f` |
+| #162 | `c8432772` |
+| #160 | `34a2fcd6` |
+
+Detalle en «ciclo 10». En este ciclo no se mergeó ni se aprobó nada.
+
+Batería corrida de verdad sobre cada rama (`/tmp/verify2.sh`, `HOME=/home/box`). Antes de correrla se verificó que la variable de tailscale fake no está seteada y que el guard `testing.Testing()` está en `tunnel.go`. Pasos:
+- `go build ./...`;
+- `go vet ./...`;
+- `go vet -tags=integration ./...`;
+- `go test -count=1 ./...`;
+- `-race` en los paquetes que toca el PR;
+- `go test -tags=integration -race ./internal/integration/...`;
+- `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...`, más el binario `cmd/9router-go` (ELF aarch64 `b7`).
+
+- **#157** `fix/fallback-catalog-audit-20261030`:
+  - estaba 22 commits detrás de `main`;
+  - merge de `origin/main`, sin conflictos → `11f9e378` (push normal);
+  - todo OK, salvo un fallo en `-race` (chat, dashboard y providers) del flake conocido `TestHandleGetConnectionUsage_SpacesBurstAcrossConnections` (28.10ms, mínimo 40ms). Re-corrido una vez, pasó;
+  - los 9 tests nuevos pasan con `-v`;
+  - CI en verde: test 2m39s, Integration 42s, Docker 1m52s;
+  - comentario: https://github.com/joselofarias-byte/capimux/pull/157#issuecomment-6533841507
+  - no agrega una entrada en `CHANGELOG.md`.
+- **#163** `fix/combo-strategy-persistencia-20261030`:
+  - al día con `main` (0 commits detrás, CLEAN): sin merge ni push;
+  - `fa759c44` todo OK, incluido `-race` en db y dashboard, sin flakes;
+  - los 8 tests nuevos pasan con `-v`;
+  - CI en verde: test 1m55s, Integration 1m11s, Docker 1m47s;
+  - comentario: https://github.com/joselofarias-byte/capimux/pull/163#issuecomment-6533841801
+- **#156** (esta rama):
+  - estaba 22 commits detrás de `main`;
+  - merge de `origin/main`, sin conflictos → `d5e74889` (push normal); el diff contra `main` es solo este archivo;
+  - batería sobre `d5e74889`: todo OK, salvo un fallo en `go test ./...` del flake conocido `TestGateAcquire_SpacesConcurrentCallers` de fetchgate (34.47ms, mínimo 40ms). Re-corrido una vez, pasó;
+  - `-race` en handlers, providers y controlplane OK;
+  - CI en verde sobre `d5e74889`: test 2m44s, Integration 47s, Docker 2m12s.
+
+**Orden de merge recomendado: #163 → #157 → #156.**
+- #157 y #163 no tienen archivos en común:
+  - #157 toca `handlers/chat` (`combo.go`, `fallback.go`), `providers/registry_models.go` y tests;
+  - #163 toca `internal/db` (`dashboard.go`, `settings.go`), `handlers/dashboard` (`combos.go`, `combos_family.go`), tests y `CHANGELOG.md`.
+- `git merge-tree` entre las dos ramas da limpio. Su merge conjunto sobre `main` (solo local, sin push) compila y pasa `go test ./...`; el único fallo fue el mismo flake de fetchgate, re-corrido una vez y OK.
+- El orden entre ambas, entonces, no lo impone un conflicto. Va primero #163 porque:
+  - ya está al día con `main` y CLEAN, así que entra sin otra actualización;
+  - es el cambio más chico y aislado, y arregla una pérdida de datos visible (la estrategia no se guardaba);
+  - después #157 solo necesita confirmar la CI contra el `main` nuevo, sin conflicto esperado.
+- #156 va al final porque documenta el estado de los otros dos. Antes de mergearlo hay que actualizar los SHA si cambian.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -693,7 +748,7 @@ Ciclo 9: las cinco decisiones del dueño quedaron aplicadas en #161 (decisiones 
 
 Ciclo 10: mergeados con autorización escrita #158, #161, #159, #162 y #160 (SHA en la sección 6, «ciclo 10»). Main queda en `34a2fcd6`, verificado. #163 (persistencia de `strategy`) tiene la CI en verde y queda sin mergear.
 
-Siguiente prioridad (actualizada en el ciclo 10): #163 y #157 a decisión del dueño; #156 sin mergear. Antes era: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
+Siguiente prioridad (actualizada en el ciclo 11): #163 (`fa759c44`) y #157 (`11f9e378`) verificados, con la CI en verde y a decisión del dueño, en el orden recomendado #163 → #157 → #156 (sección 6, «ciclo 11»). #156 sigue sin mergear. Antes era: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
 - probar el script de Workbuddy migrado en Termux (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
