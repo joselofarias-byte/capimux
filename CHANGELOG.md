@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Rate limits: a 429 whose wait is a JSON number in the body (`retry_after: 30`, `retryAfter`, `error.retry_after`, the `error.retry_after`/`reset_at` pair this router itself sends, i.e. a chained Capimux/9router upstream) parks the account for that window. Previously one numeric field made the whole decode fail, the wait was lost and the exhausted account came back after the 2s base backoff. A huge delta-seconds (header or body) no longer overflows into "no wait"; it is held to the 2h cooldown cap.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
