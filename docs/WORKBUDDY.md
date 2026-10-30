@@ -35,15 +35,34 @@ bash scripts/workbuddy-termux-bootstrap.sh
 
 The script installs missing dependencies, installs the official CodeBuddy CLI, opens the API-key page, imports the credential through 9router, runs a low-cost probe, reports usage telemetry, and writes a credential-free snapshot to `~/.config/9router-go/workbuddy-last-probe.json`.
 
-The default local router URL is `http://127.0.0.1:20128`. The bootstrap first tries `NINEROUTER_API_KEY`; if it is unset, it uses `~/.config/9router-go/admin-token` when present.
+The default local router URL is `http://127.0.0.1:20128`.
 
-The import call is `POST /api/oauth/codebuddy-intl/import` with `Authorization: Bearer <token>`, which the router treats as a client API key. With login enforced, client-key credential writes follow the admin-only setting `allowClientCredentialImport`:
+#### Authentication
 
-- not set (default, compatibility): append-only imports such as this one keep working; they always add a new connection and cannot overwrite one or choose its destination.
-- `false`: the import answers HTTP 403. Run the bootstrap from the dashboard host with an admin session, or set it to `true`.
-- `true`: client keys may also create connections through `POST /api/connections`, still without `baseUrl`/endpoint/proxy fields.
+Importing a provider credential is an admin action, so the bootstrap imports with the **local admin token** (`x-9r-cli-token`). A client API key is not enough.
 
-A client key can never overwrite an existing credential, whatever the value (account-matching OAuth flows, `allowOverwrite`, or editing `apiKey`/tokens of a connection answer HTTP 403).
+- **Import.** `POST /api/oauth/codebuddy-intl/import` carries `x-9r-cli-token`. The script derives that token from the router's data dir and never prints, logs or passes it on the command line. It writes the token to a temporary `0600` header file, which is deleted on exit.
+  - The token is `sha256(machine-id + "9r-cli-auth" + auth/cli-secret)`, first 16 hex characters. Both files live in `DATA_DIR`.
+  - The script looks in `NINEROUTER_DATA_DIR`, then `DATA_DIR`, then the default `~/.9router`. If 9router-go runs with another data dir, export it before running the script.
+  - If either file is readable by group or others, the script refuses to continue and asks you to `chmod 600` them.
+  - If the files do not exist yet, the script makes one harmless request so the router creates them.
+- **Probe.** `POST /chat/completions` still uses a normal client API key, from `NINEROUTER_API_KEY` or the legacy file `~/.config/9router-go/admin-token` (despite its name, that file holds a client API key). The key is optional when the router does not require one.
+
+Run the script as the same Termux user, on the same device as 9router-go, so it can read the data dir. Nothing else needs to change on an existing install.
+
+#### Client API keys and credentials
+
+With login enforced, a request authenticated only by a client API key follows the admin-only setting `allowClientCredentialImport`:
+
+- not set, or `false`: no credential import or creation with a client API key (HTTP 403);
+- `true`: client keys may add new credentials through the append-only imports and `POST /api/connections`, without `baseUrl`/endpoint/proxy fields. The new connection always goes to the end of the rotation.
+
+A client API key can never overwrite an existing credential, change priorities or the rotation order, delete connections, or create, edit or delete provider nodes, whatever the value.
+
+#### Reverting
+
+- To let client API keys import again (for example an older copy of this script that sends `Authorization: Bearer`), an admin sets `allowClientCredentialImport` to `true`. Do this from the dashboard with an admin session, or with the local admin token: `PATCH /api/settings` with `{"allowClientCredentialImport": true}`. Remove the setting, or set it to `false`, to close imports again.
+- To go back to the previous behaviour entirely, run a build from before PR #158.
 
 ## Free/session route (`workbuddy-session`)
 

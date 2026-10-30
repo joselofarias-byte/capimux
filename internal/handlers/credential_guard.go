@@ -14,8 +14,8 @@ type credentialWriteKind int
 
 const (
 	// credentialAppendOnly routes always insert a new row with a fresh id and
-	// take no destination fields. Open to a client key unless an admin set
-	// allowClientCredentialImport=false.
+	// take no destination fields. Open to a client key only after an admin set
+	// allowClientCredentialImport=true; the row goes last in the rotation.
 	credentialAppendOnly credentialWriteKind = iota
 	// credentialUpsert routes match the account (email, token hash, …) and
 	// rewrite an existing row in place. A client key could replace the
@@ -37,13 +37,13 @@ func guardCredentialWrite(repo *db.Repo, kind credentialWriteKind, next http.Han
 		}
 		switch kind {
 		case credentialAppendOnly:
-			if enabled, set := auth.ClientCredentialImport(repo); enabled || !set {
+			if enabled, _ := auth.ClientCredentialImport(repo); enabled {
 				next(w, r.WithContext(auth.WithClientKeyWrite(r.Context())))
 				return
 			}
 			handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
 				"error": clientCredentialMessage("importar credenciales de proveedor") +
-					" Un administrador desactivó la importación con API key (" + auth.ClientCredentialImportSetting + "=false).",
+					" Para permitirlo de forma explícita, un administrador puede activar el ajuste " + auth.ClientCredentialImportSetting + ".",
 			})
 		default:
 			handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{

@@ -132,7 +132,14 @@ func (e *wbEnv) workbuddyRows(t *testing.T) []map[string]any {
 // The bootstrap imports with the local admin token, so it works even when an
 // admin closed client-key imports, and still probes with the client key.
 func TestWorkbuddyBootstrapImportsWithAdminToken(t *testing.T) {
-	e := newWorkbuddyEnv(t, map[string]any{"allowClientCredentialImport": false})
+	t.Run("default (setting absent, closed)", func(t *testing.T) { runWorkbuddyAdminImport(t, nil) })
+	t.Run("setting false", func(t *testing.T) {
+		runWorkbuddyAdminImport(t, map[string]any{"allowClientCredentialImport": false})
+	})
+}
+
+func runWorkbuddyAdminImport(t *testing.T, settings map[string]any) {
+	e := newWorkbuddyEnv(t, settings)
 	out, err := e.run(t, "NINEROUTER_API_KEY="+wbClientKey)
 	if err != nil {
 		t.Fatalf("bootstrap failed: %v\n%s", err, out)
@@ -154,7 +161,7 @@ func TestWorkbuddyBootstrapImportsWithAdminToken(t *testing.T) {
 // Without the admin token (another DATA_DIR) the import is refused and the
 // script says how to fix it; a client API key alone does not import.
 func TestWorkbuddyBootstrapWithoutAdminTokenFailsClearly(t *testing.T) {
-	e := newWorkbuddyEnv(t, map[string]any{"allowClientCredentialImport": false})
+	e := newWorkbuddyEnv(t, nil)
 	out, err := e.run(t, "NINEROUTER_API_KEY="+wbClientKey, "DATA_DIR="+t.TempDir())
 	if err == nil {
 		t.Fatalf("bootstrap succeeded without the admin token:\n%s", out)

@@ -12,13 +12,13 @@ import (
 // provider credentials. Overwriting existing credentials is never allowed for
 // such a request, whatever its value.
 //
-//   - absent: compatibility mode. Only the append-only import endpoints
-//     (POST /api/oauth/{provider}/import, POST /api/oauth/codex/bulk-import),
-//     which always insert a fresh row and accept no destination fields, stay
-//     open; scripts/workbuddy-termux-bootstrap.sh depends on the first one.
-//   - false: no credential import or creation with a client key.
-//   - true: new credentials may also be created through POST /api/connections,
-//     still without destination fields and without replacing existing rows.
+//   - absent or false (default): no credential import or creation with a
+//     client key. scripts/workbuddy-termux-bootstrap.sh imports with the local
+//     admin (CLI) token instead.
+//   - true: new credentials may be added through the append-only imports
+//     (POST /api/oauth/{provider}/import, POST /api/oauth/codex/bulk-import)
+//     and POST /api/connections, without destination fields, without
+//     replacing existing rows and always at the end of the rotation.
 const ClientCredentialImportSetting = "allowClientCredentialImport"
 
 // ClientKeyOnly reports whether a dashboard request was let through only by a
