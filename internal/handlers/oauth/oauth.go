@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"time"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
@@ -92,11 +93,23 @@ func (h *OAuthHandler) HandleOAuthImport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	priority, err := h.clientKeyImportPriority(r, provider)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	now := currentTimestamp()
-	_, err = h.Repo.RawDB().Exec(
-		`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, 1, ?, ?, ?)`,
-		connID, provider, connName, string(data), now, now,
-	)
+	if priority == nil {
+		_, err = h.Repo.RawDB().Exec(
+			`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, 1, ?, ?, ?)`,
+			connID, provider, connName, string(data), now, now,
+		)
+	} else {
+		_, err = h.Repo.RawDB().Exec(
+			`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, ?, 1, ?, ?, ?)`,
+			connID, provider, connName, priority, string(data), now, now,
+		)
+	}
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("save connection: %v", err))
 		return
@@ -301,11 +314,23 @@ func (h *OAuthHandler) HandleOAuthCodexBulkImport(w http.ResponseWriter, r *http
 			log.Error("oauth", "marshal Codex bulk import failed", "error", err)
 			continue
 		}
+		priority, err := h.clientKeyImportPriority(r, "codex")
+		if err != nil {
+			log.Error("oauth", "Codex bulk import priority failed", "error", err)
+			continue
+		}
 		now := currentTimestamp()
-		_, err = h.Repo.RawDB().Exec(
-			`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, 1, ?, ?, ?)`,
-			connID, name, string(data), now, now,
-		)
+		if priority == nil {
+			_, err = h.Repo.RawDB().Exec(
+				`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, 1, ?, ?, ?)`,
+				connID, name, string(data), now, now,
+			)
+		} else {
+			_, err = h.Repo.RawDB().Exec(
+				`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, ?, 1, ?, ?, ?)`,
+				connID, name, priority, string(data), now, now,
+			)
+		}
 		if err == nil {
 			imported = append(imported, connID)
 		}
@@ -359,4 +384,19 @@ func randomString(n int) string {
 func sha256Base64(input string) string {
 	h := sha256.Sum256([]byte(input))
 	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// clientKeyImportPriority is the priority for a connection an import inserts:
+// NULL (unchanged behaviour) for the admin, and the end of the provider's
+// rotation when a client API key was allowed to import, so the new row never
+// moves ahead of an existing one.
+func (h *OAuthHandler) clientKeyImportPriority(r *http.Request, provider string) (*int, error) {
+	if !auth.IsClientKeyWrite(r.Context()) {
+		return nil, nil
+	}
+	p, err := h.Repo.LastConnectionPriority(provider)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }

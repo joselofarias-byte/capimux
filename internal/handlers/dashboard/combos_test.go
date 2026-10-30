@@ -57,9 +57,10 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 	defer cleanup()
 	router := setupTestRouter(repo)
 
-	// A bazaarlink connection exists: its registry list has exactly one
-	// free-tier model ("auto:free"), which is what the combo must contain.
-	const providerID = "bazaarlink"
+	// An opencode connection exists: its registry list has exactly two
+	// free-tier chat models, which is what the combo must contain (a combo
+	// needs at least two to fall back — owner decision 3, cycle 9).
+	const providerID = "opencode"
 	seedConnection(t, repo.RawDB(), providerID)
 
 	rec := postJSON(t, router, "/api/combos/auto-free", nil)
@@ -71,11 +72,13 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	models, _ := created["models"].([]any)
-	if len(models) != 1 {
-		t.Fatalf("expected 1 free model, got %v", models)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 free models, got %v", models)
 	}
-	if got := models[0]; got != "bzl/auto:free" {
-		t.Errorf("expected bzl/auto:free, got %v", got)
+	for _, want := range ocFreeModels {
+		if !slices.Contains(models, any(want)) {
+			t.Errorf("expected %s in %v", want, models)
+		}
 	}
 
 	// A generated combo is an ordinary row: renaming it must succeed, because
@@ -93,7 +96,7 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 	// Editing the model set must succeed too — a locked model set meant the
 	// rebuild was the only way to change what the combo points at.
 	rec = putJSON(t, router, "/api/combos/"+AutoFreeComboID, map[string]any{
-		"models": []string{"bzl/auto:free", "bzl/claude-opus-4.7"},
+		"models": []string{"oc/muse-spark-1.3-contributor-free"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("model-set change expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -102,7 +105,7 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("comboModels: %v", err)
 	}
-	if len(members) != 2 {
+	if len(members) != 1 {
 		t.Errorf("expected the edited model set to persist, got %v", members)
 	}
 
@@ -118,7 +121,7 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("comboModels after strategy-only update: %v", err)
 	}
-	if len(members) != 2 {
+	if len(members) != 1 {
 		t.Errorf("strategy-only update clobbered the model set: %v", members)
 	}
 
@@ -147,10 +150,13 @@ func TestAutoFreeComboCreateRebuildAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("comboModels after rebuild: %v", err)
 	}
-	if len(members) != 1 || members[0] != "bzl/auto:free" {
+	if len(members) != 2 || !slices.Contains(members, ocFreeModels[0]) || !slices.Contains(members, ocFreeModels[1]) {
 		t.Errorf("rebuild must restore the registry model set, got %v", members)
 	}
 }
+
+// ocFreeModels are opencode's two free-tier chat models in the registry.
+var ocFreeModels = []string{"oc/muse-spark-1.3-contributor-free", "oc/muse-spark-1.2-contributor-free"}
 
 func mustCombo(t *testing.T, repo *db.Repo, id string) *models.Combo {
 	t.Helper()
@@ -191,9 +197,9 @@ func TestAutoFreeComboExcludesNonChatFreeModels(t *testing.T) {
 		t.Fatalf("embedding-only free models expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Adding a provider that does have a free chat model keeps the combo, and
+	// Adding a provider that does have free chat models builds the combo, and
 	// the embedding entry must not be in it.
-	seedConnection(t, repo.RawDB(), "bazaarlink")
+	seedConnection(t, repo.RawDB(), "opencode")
 	rec = postJSON(t, router, "/api/combos/auto-free", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auto-free expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -202,8 +208,8 @@ func TestAutoFreeComboExcludesNonChatFreeModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("comboModels: %v", err)
 	}
-	if want := []string{"bzl/auto:free"}; !slices.Equal(members, want) {
-		t.Errorf("combo members = %v, want %v (the embedding model must be excluded)", members, want)
+	if len(members) != 2 || !slices.Contains(members, ocFreeModels[0]) || !slices.Contains(members, ocFreeModels[1]) {
+		t.Errorf("combo members = %v, want %v (the embedding model must be excluded)", members, ocFreeModels)
 	}
 }
 

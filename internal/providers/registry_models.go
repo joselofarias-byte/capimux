@@ -7,7 +7,7 @@ import "strings"
 // keyed by uiAlias/alias and by provider id so both lookups resolve).
 var ProviderModels = map[string][]string{
 	"aai":                  {"universal-3-pro", "universal-2", "best", "nano"},
-	"agnes":              {"agnes-2.5-flash", "agnes-2.5-pro", "agnes-2.5-pro-beta", "agnes-3.0-flash"},
+	"agnes":                {"agnes-2.5-flash", "agnes-2.5-pro", "agnes-2.5-pro-beta", "agnes-3.0-flash"},
 	"af":                   {"gpt-oss-120b", "gpt-oss-20b", "kimi-k2.7-code"},
 	"ag":                   {"gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-3.8-flash", "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low", "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-high", "gemini-3-flash-agent", "gemini-3.5-flash-low", "gemini-3.5-flash-extra-low", "gemini-pro-agent", "gemini-3.1-pro-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium", "gemini-3-flash", "gemini-3.1-flash-image"},
 	"alicode":              {"qwen3.5-plus", "kimi-k2.5", "glm-5", "MiniMax-M2.5", "qwen3-max-2026-01-23", "qwen3-coder-next", "qwen3-coder-plus", "glm-4.7"},
@@ -143,7 +143,7 @@ var ProviderModels = map[string][]string{
 	"vertex":               {"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.0-generate-001", "veo-2.0-generate-001"},
 	"vertex-partner":       {"deepseek-ai/deepseek-v3.2-maas", "qwen/qwen3-next-80b-a3b-thinking-maas", "qwen/qwen3-next-80b-a3b-instruct-maas", "zai-org/glm-5-maas"},
 	"volcengine-ark":       {"Doubao-Seed-2.0-Code", "Doubao-Seed-2.0-pro", "Doubao-Seed-2.0-lite", "Doubao-Seed-Code", "DeepSeek-V4-Flash", "DeepSeek-V4-Pro", "GLM-5.1", "MiniMax-M2.7", "Kimi-K2.6"},
-	"v1m":                 {"rev-latest", "v1m-decision-engine"},
+	"v1m":                  {"rev-latest", "v1m-decision-engine"},
 	"voyage":               {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3", "voyage-finance-2", "voyage-law-2", "voyage-multilingual-2"},
 	"voyage-ai":            {"voyage-3-large", "voyage-3.5", "voyage-3.5-lite", "voyage-code-3", "voyage-finance-2", "voyage-law-2", "voyage-multilingual-2"},
 	"vx":                   {"gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "veo-3.1-generate-preview", "veo-3.1-fast-generate-preview", "veo-3.0-generate-001", "veo-2.0-generate-001"},
@@ -284,14 +284,14 @@ var ProviderModelKinds = map[string]map[string]string{
 		"nomic-ai/nomic-embed-text-v1.5": "embedding",
 	},
 	"gemini": {
+		// gemini-2.5-pro/flash/flash-lite are listed twice in ProviderModels
+		// (chat and speech-to-text). This map only removes non-chat models
+		// from chat lists, so those ids carry no kind here.
 		"embedding-001":    "embedding",
 		"gemini-2.0-flash": "stt",
 		"gemini-2.5-flash-native-audio-preview-09-17": "stt",
-		"gemini-2.5-flash":                            "stt",
 		"gemini-2.5-flash-image":                      "image",
-		"gemini-2.5-flash-lite":                       "stt",
 		"gemini-2.5-flash-preview-tts":                "tts",
-		"gemini-2.5-pro":                              "stt",
 		"gemini-2.5-pro-preview-tts":                  "tts",
 		"gemini-3-pro-image-preview":                  "image",
 		"gemini-3.1-flash-image-preview":              "image",
