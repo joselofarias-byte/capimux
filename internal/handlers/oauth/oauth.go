@@ -146,6 +146,10 @@ func (h *OAuthHandler) HandleOAuthKiroSocialAuthorize(w http.ResponseWriter, r *
 	})
 }
 
+// kiroSocialTokenURL is the Kiro desktop auth token endpoint (a variable so
+// tests can point it at a local server).
+var kiroSocialTokenURL = "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token"
+
 // HandleOAuthKiroSocialExchange exchanges auth code for Kiro tokens.
 // POST /api/oauth/kiro/social-exchange
 // Upstream parity (KiroService.exchangeSocialCode): the desktop auth service
@@ -186,11 +190,16 @@ func (h *OAuthHandler) HandleOAuthKiroSocialExchange(w http.ResponseWriter, r *h
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to encode exchange request")
 		return
 	}
-	tokenResp, err := http.Post(
-		"https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token",
-		"application/json",
-		bytes.NewReader(exchangePayload),
-	)
+	// Bound the exchange: http.Post used the default client (no timeout) and
+	// ignored the request context, so a stalled auth host kept this handler
+	// and its goroutine alive forever even after the browser gave up.
+	exchangeReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, kiroSocialTokenURL, bytes.NewReader(exchangePayload))
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to build exchange request")
+		return
+	}
+	exchangeReq.Header.Set("Content-Type", "application/json")
+	tokenResp, err := deviceClient.Do(exchangeReq)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange failed: %v", err))
 		return
