@@ -76,22 +76,26 @@ func TestGateAcquire_SpacesConcurrentCallers(t *testing.T) {
 }
 
 // Jitter must only ever add delay: the floor stays the hard guarantee.
-// A wall-clock wait can land a sliver under that floor when the timer or
-// scheduler runs early, so this uses the same 90% tolerance as the spacing test.
+// Slots are scheduled from the previous slot's start, not from when the
+// previous Acquire returned, so measuring each wait from the previous return
+// under-reports it whenever that goroutine was descheduled (observed: 22ms for
+// a 30ms floor on a loaded runner). Measuring every grant from one origin is
+// immune to that: lateness only adds time. A wall-clock timer can still fire a
+// sliver early, hence the same 90% tolerance as the spacing test.
 func TestGateAcquire_JitterOnlyWidensTheGap(t *testing.T) {
 	const floor = 30 * time.Millisecond
 	g := New(floor, floor)
 
+	origin := time.Now()
 	if err := g.Acquire(t.Context()); err != nil {
 		t.Fatalf("first Acquire: %v", err)
 	}
 	for i := range 5 {
-		start := time.Now()
 		if err := g.Acquire(t.Context()); err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)
 		}
-		if elapsed := time.Since(start); elapsed < floor*9/10 {
-			t.Fatalf("slot %d waited %s, want at least %s (90%% of the %s floor)", i, elapsed, floor*9/10, floor)
+		if elapsed, want := time.Since(origin), time.Duration(i+1)*floor*9/10; elapsed < want {
+			t.Fatalf("slot %d opened %s after the first, want at least %s (90%% of %d x %s floor)", i, elapsed, want, i+1, floor)
 		}
 	}
 }
