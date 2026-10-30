@@ -109,13 +109,22 @@ func TestConnectionLifecycle(t *testing.T) {
 	})
 
 	t.Run("update renames it", func(t *testing.T) {
-		res := env.Put(t, "/api/connections/"+id, map[string]any{
+		rename := map[string]any{
 			"provider": "deepseek",
 			"authType": "apikey",
 			"name":     "DeepSeek Renamed",
 			"apiKey":   "sk-deepseek-secret",
 			"priority": 1,
-		})
+		}
+		// Changing a connection's configuration is admin-only: the client
+		// API key is refused and the name stays.
+		if res := env.Put(t, "/api/connections/"+id, rename); res.Status != http.StatusForbidden {
+			t.Fatalf("API key PUT /api/connections/%s = %d, want 403 (body: %s)", id, res.Status, truncate(res.Body))
+		}
+		if got := requireConnection(t, listConnections(t, env), id).Name; got != "DeepSeek Primary" {
+			t.Fatalf("connection renamed by an API key: %q", got)
+		}
+		res := env.Put(t, "/api/connections/"+id, rename, operator(t)...)
 		if res.Status != http.StatusOK {
 			t.Fatalf("PUT /api/connections/%s = %d, want 200 (body: %s)", id, res.Status, truncate(res.Body))
 		}

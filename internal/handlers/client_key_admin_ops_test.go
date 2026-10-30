@@ -103,10 +103,8 @@ func TestClientKeyCannotRunAdminOperations(t *testing.T) {
 				t.Fatalf("provider nodes changed: %+v", nodes)
 			}
 
-			// Edits that keep the priority still work with the key.
-			if rec := c.do(http.MethodPut, "/api/connections/conn-second", `{"name":"renamed","priority":2}`, engineKeyAuth); rec.Code != http.StatusOK {
-				t.Errorf("rename with unchanged priority: %d %s", rec.Code, rec.Body.String())
-			}
+			// Since cycle 9 every other PUT is admin-only as well; see
+			// TestClientKeyCannotChangeConnectionConfigOrState.
 		})
 	}
 }

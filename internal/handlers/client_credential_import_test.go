@@ -147,9 +147,9 @@ func TestClientKeyCannotOverwriteCredentials(t *testing.T) {
 			if rec := c.do(http.MethodGet, "/api/oauth/codex/start-proxy", "", engineKeyAuth); rec.Code != http.StatusForbidden {
 				t.Errorf("codex start-proxy: expected 403 for a client key, got %d: %s", rec.Code, rec.Body.String())
 			}
-			// Ordinary edits with the key keep working.
-			if rec := c.do(http.MethodPut, "/api/connections/conn-owner", `{"name":"renamed","priority":1,"data":{"apiKey":"owner-upstream-key"}}`, engineKeyAuth); rec.Code != http.StatusOK {
-				t.Errorf("rename with unchanged key: %d %s", rec.Code, rec.Body.String())
+			// Since cycle 9 even a rename that keeps the key is admin-only.
+			if rec := c.do(http.MethodPut, "/api/connections/conn-owner", `{"name":"renamed","priority":1,"data":{"apiKey":"owner-upstream-key"}}`, engineKeyAuth); rec.Code != http.StatusForbidden {
+				t.Errorf("rename with unchanged key: expected 403, got %d %s", rec.Code, rec.Body.String())
 			}
 		})
 	}

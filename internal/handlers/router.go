@@ -134,7 +134,7 @@ func SetupRoutes(r interface {
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
 	r.Get("/api/usage/{connectionId}", dashH.HandleGetConnectionUsage)
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
-	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	r.Post("/api/usage/{connectionId}/reset-credits/consume", adminOnly(repo, "consumir créditos de reinicio de una cuenta", dashH.HandleConsumeCodexResetCredit))
 
 	// Debug Tracing Domain (p50/p95 latency per provider+model)
 	r.Get("/debug/traces", HandleDebugTraces)
@@ -156,14 +156,18 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/providers/client", dashH.HandleGetProvidersClient)
 	r.Post("/api/connections", dashH.HandleCreateConnection)
 	r.Post("/api/providers/validate", dashH.HandleValidateProvider)
-	r.Put("/api/connections/{id}", dashH.HandleUpdateConnection)
-	r.Put("/api/providers/{id}", dashH.HandleUpdateConnection)
+	// Renaming, enabling/disabling, the assigned model and every other field of
+	// a connection are admin-only: a client API key uses the connections, it
+	// does not configure them.
+	r.Put("/api/connections/{id}", adminOnly(repo, "modificar conexiones (nombre, estado, modelo u otra configuración)", dashH.HandleUpdateConnection))
+	r.Put("/api/providers/{id}", adminOnly(repo, "modificar conexiones (nombre, estado, modelo u otra configuración)", dashH.HandleUpdateConnection))
 	r.Delete("/api/connections/{id}", adminOnly(repo, "borrar conexiones", dashH.HandleDeleteConnection))
 	r.Delete("/api/providers/{id}", adminOnly(repo, "borrar conexiones", dashH.HandleDeleteConnection))
-	r.Post("/api/connections/{id}/test", dashH.HandleTestConnection)
+	// The probe writes the result (and refreshed tokens) back to the row.
+	r.Post("/api/connections/{id}/test", adminOnly(repo, "probar conexiones (guarda su estado)", dashH.HandleTestConnection))
 	r.Post("/api/connections/{id}/reorder", adminOnly(repo, "cambiar el orden de rotación", dashH.HandleReorderConnection))
 	r.Post("/api/providers/{id}/reorder", adminOnly(repo, "cambiar el orden de rotación", dashH.HandleReorderConnection))
-	r.Post("/api/providers/{id}/test", dashH.HandleTestConnection)
+	r.Post("/api/providers/{id}/test", adminOnly(repo, "probar conexiones (guarda su estado)", dashH.HandleTestConnection))
 	r.Get("/api/providers/suggested-models", HandleSuggestedModels)
 	// Usage & Quota Endpoints (dashboard quota tracker, usage stats, and topology stream)
 	r.Get("/api/usage/stream", HandleUsageStream(repo))
@@ -175,7 +179,7 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Get("/api/usage/{connectionId}", dashH.HandleGetConnectionUsage)
 
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
-	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	r.Post("/api/usage/{connectionId}/reset-credits/consume", adminOnly(repo, "consumir créditos de reinicio de una cuenta", dashH.HandleConsumeCodexResetCredit))
 
 	r.Get("/api/provider-nodes", dashH.HandleGetProviderNodes)
 	r.Post("/api/provider-nodes", adminOnly(repo, "crear provider nodes", dashH.HandleCreateProviderNode))
@@ -192,10 +196,12 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Delete("/api/combos/{id}", dashH.HandleDeleteCombo)
 
 	r.Get("/api/proxy-pools", dashH.HandleGetProxyPools)
-	r.Post("/api/proxy-pools", dashH.HandleCreateProxyPool)
-	r.Put("/api/proxy-pools/{id}", dashH.HandleUpdateProxyPool)
-	r.Delete("/api/proxy-pools/{id}", dashH.HandleDeleteProxyPool)
-	r.Post("/api/proxy-pools/{id}/test", dashH.HandleTestProxyPool)
+	// Proxy pools decide where connection traffic, credentials included, is
+	// sent: same admin-only rule as the connections themselves.
+	r.Post("/api/proxy-pools", adminOnly(repo, "crear proxy pools", dashH.HandleCreateProxyPool))
+	r.Put("/api/proxy-pools/{id}", adminOnly(repo, "modificar proxy pools", dashH.HandleUpdateProxyPool))
+	r.Delete("/api/proxy-pools/{id}", adminOnly(repo, "eliminar proxy pools", dashH.HandleDeleteProxyPool))
+	r.Post("/api/proxy-pools/{id}/test", adminOnly(repo, "probar proxy pools (guarda su estado)", dashH.HandleTestProxyPool))
 
 	r.Get("/api/keys", dashH.HandleGetApiKeys)
 	r.Post("/api/keys", dashH.HandleCreateApiKey)
@@ -296,7 +302,7 @@ func mountOAuthRoutes(r interface {
 	r.Post("/api/oauth/freebuff/initiate", oauthH.HandleFreebuffInitiate)
 	r.Post("/api/oauth/freebuff/poll", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleFreebuffPoll))
 	r.Get("/api/oauth/freebuff/session", oauthH.HandleFreebuffSessionStatus)
-	r.Post("/api/oauth/freebuff/session/switch", oauthH.HandleFreebuffSessionSwitch)
+	r.Post("/api/oauth/freebuff/session/switch", adminOnly(oauthH.Repo, "cambiar la sesión de una conexión Freebuff", oauthH.HandleFreebuffSessionSwitch))
 	r.Get("/api/oauth/antigravity/authorize", oauthH.HandleAntigravityAuthorize)
 	r.Post("/api/oauth/antigravity/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleAntigravityExchange))
 	r.Get("/api/oauth/cline/authorize", oauthH.HandleClineAuthorize)

@@ -57,7 +57,7 @@ With login enforced, a request authenticated only by a client API key follows th
 - not set, or `false`: no credential import or creation with a client API key (HTTP 403);
 - `true`: client keys may add new credentials through the append-only imports and `POST /api/connections`, without `baseUrl`/endpoint/proxy fields. The new connection always goes to the end of the rotation.
 
-A client API key can never overwrite an existing credential, change priorities or the rotation order, delete connections, or create, edit or delete provider nodes, whatever the value.
+A client API key can never overwrite an existing credential, change priorities or the rotation order, delete connections, or create, edit or delete provider nodes, whatever the value. It also cannot rename, enable or disable a connection, assign it a model, change any other connection field, run a connection test (the test writes the result back), consume Codex reset credits, switch the Freebuff seat, or create, edit, delete or test proxy pools: all of these need the admin session or the local admin token. A client API key only *uses* the connections. The bootstrap is not affected: it imports with the local admin token and only probes `/chat/completions` with the client key.
 
 #### Reverting
 
