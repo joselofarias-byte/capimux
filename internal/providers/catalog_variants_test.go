@@ -15,6 +15,13 @@ import (
 // answers with body, and returns the in-memory catalog.
 func syncFromBody(t *testing.T, body []byte, filePath string) error {
 	t.Helper()
+	return syncFromBodyWithETag(t, body, filePath, "")
+}
+
+// syncFromBodyWithETag sets the stored ETag to etag before syncing; the mock
+// ignores If-None-Match and always answers 200 with body.
+func syncFromBodyWithETag(t *testing.T, body []byte, filePath, etag string) error {
+	t.Helper()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(body)
@@ -25,7 +32,7 @@ func syncFromBody(t *testing.T, body []byte, filePath string) error {
 		t.Fatal(err)
 	}
 	syncStateMu.Lock()
-	syncState.ETag = ""
+	syncState.ETag = etag
 	syncStateMu.Unlock()
 	return SyncModelCatalog(context.Background(), &http.Client{Transport: rewriteTransport{base: base}}, filePath)
 }

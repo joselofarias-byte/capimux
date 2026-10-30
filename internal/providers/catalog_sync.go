@@ -345,19 +345,26 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB limit
 	if err != nil {
-		return fmt.Errorf("read catalog body: %w", err)
+		return rejectCatalog(resp.StatusCode, len(body), "no se pudo leer el cuerpo: "+err.Error())
 	}
 
+	// Validate first, publish after: an HTTP 200 whose body is null, {}, an
+	// empty catalog or not the models.dev shape never replaces the catalog in
+	// memory, the cache file or the stored ETag, so the next manual or
+	// periodic sync retries from scratch.
 	// models.dev format: map of providerID -> providerData { models: map[modelID]modelData }.
 	var rawData map[string]modelsDevProvider
 	if err := json.Unmarshal(body, &rawData); err != nil {
-		syncStateMu.Lock()
-		syncState.LastError = err.Error()
-		syncStateMu.Unlock()
-		return fmt.Errorf("decode catalog json: %w", err)
+		return rejectCatalog(resp.StatusCode, len(body), "estructura inválida: "+err.Error())
+	}
+	if reason := invalidCatalogReason(rawData); reason != "" {
+		return rejectCatalog(resp.StatusCode, len(body), reason)
 	}
 
 	modelsMap, providersMap, variantsMap := buildSyncedCatalog(rawData)
+	if len(modelsMap) == 0 && len(providersMap) == 0 {
+		return rejectCatalog(resp.StatusCode, len(body), "ningún modelo declara límites ni modalidades")
+	}
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 	synced := &SyncedCatalog{
@@ -365,6 +372,14 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 		Models:    modelsMap,
 		Providers: providersMap,
 		Variants:  variantsMap,
+	}
+
+	// The cache file is replaced atomically (temp file + rename), so a crash
+	// or a full disk leaves the previous file intact, never a truncated one.
+	if filePath != "" {
+		if err := writeCatalogFileAtomic(filePath, synced); err != nil {
+			log.Warn("catalog_sync", "could not write the catalog cache; keeping the previous file", "error", err)
+		}
 	}
 
 	catalogMu.Lock()
@@ -380,16 +395,71 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 	syncState.ModelCount = len(modelsMap)
 	syncStateMu.Unlock()
 
-	// Write to disk if filePath configured
-	if filePath != "" {
-		_ = os.MkdirAll(filepath.Dir(filePath), 0755)
-		if outBytes, err := json.Marshal(synced, jsontext.WithIndent("  ")); err == nil {
-			_ = os.WriteFile(filePath, outBytes, 0644)
-		}
-	}
-
 	log.Info("catalog_sync", "catalog synchronized successfully", "models", len(modelsMap), "providers", len(providersMap))
 	return nil
+}
+
+// invalidCatalogReason reports why a decoded feed must not replace the
+// catalog, or "" when it is usable: null, {}, providers without models, or no
+// model at all.
+func invalidCatalogReason(rawData map[string]modelsDevProvider) string {
+	if rawData == nil {
+		return "respuesta vacía (null)"
+	}
+	if len(rawData) == 0 {
+		return "catálogo vacío ({})"
+	}
+	total := 0
+	for _, p := range rawData {
+		total += len(p.Models)
+	}
+	if total == 0 {
+		return "ningún proveedor trae modelos"
+	}
+	return ""
+}
+
+// rejectCatalog records a refused sync: LastError for the panel and a warning
+// with only status, size and reason (never the body). The previous catalog,
+// cache file and ETag stay as they were.
+func rejectCatalog(status, size int, reason string) error {
+	syncStateMu.Lock()
+	syncState.LastError = "catálogo rechazado: " + reason
+	syncStateMu.Unlock()
+	log.Warn("catalog_sync", "catalog response rejected; keeping the previous catalog", "status", status, "bytes", size, "reason", reason)
+	return fmt.Errorf("catalog rejected: %s", reason)
+}
+
+func writeCatalogFileAtomic(filePath string, cat *SyncedCatalog) error {
+	outBytes, err := json.Marshal(cat, jsontext.WithIndent("  "))
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(outBytes); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filePath)
 }
 
 // StartBackgroundCatalogSync runs initial sync and 24h timer loop.
