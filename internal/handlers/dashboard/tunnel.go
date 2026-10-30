@@ -212,6 +212,13 @@ func (h *DashboardHandler) HandleTailscaleCheck(w http.ResponseWriter, r *http.R
 // HandleTailscaleEnable handles POST /api/tunnel/tailscale-enable.
 // Mirrors upstream enableTailscale: verifies login, triggers login flow if needed, and starts background Funnel.
 func (h *DashboardHandler) HandleTailscaleEnable(w http.ResponseWriter, r *http.Request) {
+	// Enabling Tailscale runs `tailscale up --reset` (whose login URL is handed
+	// back to the caller) and starts a public Funnel. A client API key must not
+	// be able to enrol the host into a tailnet or publish it to the internet.
+	if h.requiresAdminForPosture(r) {
+		writePlainError(w, http.StatusForbidden, adminRequiredMessage("activar Tailscale/Funnel"))
+		return
+	}
 	bin := tailscaleBinFn()
 	if bin == "" {
 		writePlainError(w, http.StatusBadRequest, "Tailscale CLI is not installed or detected on your system path")
