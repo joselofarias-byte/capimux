@@ -194,12 +194,15 @@ func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 }
 
 func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
+	return checkManifestWithClient(ctx, url, &http.Client{Timeout: 10 * time.Second})
+}
+
+func checkManifestWithClient(ctx context.Context, url string, client *http.Client) (*UpdateInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -301,6 +304,20 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		// releases/latest is 404 while a repository has no published
+		// release. That is "nothing to install", not a failed check.
+		log.Debug("updater", "no published release", "url", apiURL)
+		return &UpdateInfo{
+			CurrentVersion: CurrentVersion,
+			LatestVersion:  strings.TrimPrefix(CurrentVersion, "v"),
+			GoVersion:      runtime.Version(),
+			OS:             runtime.GOOS,
+			Arch:           runtime.GOARCH,
+			CheckedAt:      time.Now().UTC().Format(time.RFC3339),
+			Source:         "github_releases",
+		}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github releases HTTP %d", resp.StatusCode)
 	}
@@ -462,7 +479,11 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	if err != nil {
 		return err
 	}
-	log.Info("updater", "SHA256 checksum verified", "sha256", ComputeSHA256(binaryBytes), "archive", archiveVerified)
+	verifiedOn := "extracted binary"
+	if archiveVerified {
+		verifiedOn = "downloaded file"
+	}
+	log.Info("updater", "SHA256 checksum verified", "sha256", expectedSHA256, "verified_on", verifiedOn)
 
 	// Create temporary binary file in the target directory
 	dir := filepath.Dir(execPath)
