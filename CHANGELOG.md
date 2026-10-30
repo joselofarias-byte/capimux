@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Seguridad: con `requireLogin` activo, una API key de cliente ya no puede crear, borrar ni activar/desactivar API keys (podía acuñar una clave elegida por ella para sobrevivir a su propia revocación, o deshabilitar las del dueño). Sesión de administrador y token CLI local siguen pudiendo. Opt-in explícito: un administrador puede activar `allowClientKeyManagement` en `/api/settings` (una API key no puede activarlo). Listar claves sigue disponible, enmascarado. `scripts/workbuddy-termux-bootstrap.sh` no usa `/api/keys` y no cambia.
+
 - Seguridad: una API key de cliente (inferencia) ya no puede desactivar el login del panel, fijar o cambiar su contraseña, cambiar el modo SSO/OIDC/SAML, habilitar el acceso al panel por túnel, reescribir `tunnelUrl`/`tailscaleUrl` ni activar Tailscale/Funnel. Esas acciones exigen sesión de administrador o el token CLI local; con `requireLogin=false` el comportamiento no cambia y los ajustes ordinarios siguen aceptando la API key. Respuesta: HTTP 403 con mensaje en español.
 
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
