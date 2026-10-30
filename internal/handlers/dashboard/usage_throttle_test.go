@@ -76,13 +76,25 @@ func fastQuotaGate(t *testing.T) {
 	t.Cleanup(func() { quotaFetchGate = prev })
 }
 
-// assertSpaced fails when two upstream reads started closer together than the
-// gate floor — the exact shape that got ten accounts on one IP rate-limited.
+// assertSpaced fails when upstream reads arrived as a burst instead of one
+// gate floor apart — the exact shape that got ten accounts on one IP
+// rate-limited.
+//
+// Each read is measured from the first one, not from its neighbour: the gate
+// spaces the instants it releases callers, but each request still crosses a
+// loopback socket and an HTTP handler before the fake provider timestamps it.
+// Under the race detector and a loaded runner one delivery can lag by several
+// milliseconds, so two neighbours read 36ms apart against a 40ms floor even
+// though the gate released them 40ms apart (seen in a -race run of the full
+// suite). The cumulative bound absorbs that delivery noise, up to half a gap,
+// and still fails any burst: two reads released together sit ~0ms apart,
+// far below the half-gap allowance.
 func assertSpaced(t *testing.T, hits []time.Time, minGap time.Duration) {
 	t.Helper()
 	for i := 1; i < len(hits); i++ {
-		if gap := hits[i].Sub(hits[i-1]); gap < minGap*9/10 {
-			t.Errorf("upstream reads %d and %d were %s apart, want >= %s", i-1, i, gap, minGap)
+		want := time.Duration(i)*minGap - minGap/2
+		if got := hits[i].Sub(hits[0]); got < want {
+			t.Errorf("upstream read %d came %s after the first, want >= %s (%d gate floors of %s, minus half a floor of delivery noise)", i, got, want, i, minGap)
 		}
 	}
 }
