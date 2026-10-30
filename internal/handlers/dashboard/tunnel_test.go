@@ -237,6 +237,7 @@ func TestHandleTunnelEndpoints(t *testing.T) {
 		})
 
 		req := httptest.NewRequest(http.MethodPost, "/api/tunnel/tailscale-disable", nil)
+		asDashboardAdmin(t, req)
 		rec := httptest.NewRecorder()
 
 		h.HandleTailscaleDisable(rec, req)

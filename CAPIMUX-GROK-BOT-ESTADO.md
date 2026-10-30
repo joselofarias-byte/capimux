@@ -80,7 +80,29 @@ Todos en borrador de revisión; ningún merge, push a `main` ni force-push.
 ## 8. Errores encontrados y corregidos
 
 - Escalada de privilegios API key → administrador del panel (hallazgo 1): corregido y verificado.
-- Incidente durante la reproducción: al correr la prueba nueva contra `main` sin la corrección, el caso Tailscale llegó al handler real y ejecutó el `tailscale` instalado en la máquina de pruebas (`tailscale funnel --bg reset` y un intento de `funnel --bg <puerto>` que falló porque Funnel no está habilitado en esa tailnet). Estado posterior verificado: `tailscale serve status` → «No serve config», sin procesos `funnel` residuales. Esto en sí demuestra el riesgo real del hallazgo. Para que no se repita, la prueba vía router ya no incluye ese caso y la cobertura de Tailscale se hace con comandos simulados.
+- Incidente Tailscale del 2026-10-29: ver el apartado «Incidente Tailscale» al final de esta sección.
+
+### Incidente Tailscale (2026-10-29)
+
+**Máquina:** la máquina de trabajo de Grok Bot (Linux Debian 13 x86_64, kernel 6.12), donde Grok Bot clona y prueba el repositorio. **No** fue el teléfono del dueño ni ningún otro dispositivo suyo; nunca se tocó ni se pidió activar Tailscale en el teléfono.
+
+**Cómo pasó:** para demostrar que la prueba nueva fallaba sin la corrección, se ejecutó `go test` de `internal/handlers` sobre el código de `main`. Uno de los casos llamaba `POST /api/tunnel/tailscale-enable` a través del router real con una API key. Sin el guardia, el handler resolvió el binario real `/usr/local/bin/tailscale` de esa máquina (el seam `tailscaleBinFn`/`tailscaleExec` sólo se puede sustituir desde el paquete `dashboard`, no desde `handlers`).
+
+**Comandos que se ejecutaron, en orden** (reconstruidos del código del handler y confirmados con el CLI falso, que registra exactamente esta secuencia):
+1. `tailscale status --json` (sólo lectura). Respondió `BackendState: Running`, así que **no** se ejecutó `tailscale up --reset`.
+2. `tailscale funnel --bg reset`: **modificador**. Borra la configuración serve/funnel de ese nodo.
+3. `tailscale funnel --bg 20130`: falló con «Funnel is not enabled» (el handler devolvió `funnelNotEnabled`). **No se abrió ningún Funnel** ni se expuso ningún puerto.
+
+Después, para verificar el estado, se ejecutaron sólo lecturas: `tailscale funnel status` y `tailscale serve status`, que respondieron «No serve config».
+
+**Qué pudo cambiar:** sólo la configuración serve/funnel (ServeConfig) del nodo Tailscale de la máquina de Grok Bot. Si antes de ese momento había reglas `tailscale serve`/`funnel` en esa máquina, quedaron borradas. No se sabe si las había. No se tocaron el login, las preferencias de `up`, las ACL, los demás dispositivos de la tailnet ni el teléfono. Siguiendo la instrucción del dueño, **no se intentó restaurar** ninguna configuración desconocida.
+
+**Medidas para que no se repita** (en #145):
+- Los seams por defecto (`defaultTailscaleBin` y `defaultTailscaleExec` en `internal/handlers/dashboard/tunnel.go`) usan `testing.Testing()`. Dentro de un binario de test nunca resuelven el `tailscale` del host: sólo el falso indicado en `CAPIMUX_TEST_FAKE_TAILSCALE`. Ejecutar cualquier otro binario provoca un `panic` con el mensaje «tailscale real bloqueado…», así que una regresión hace fallar la prueba en vez de tocar la tailnet. En producción `testing.Testing()` es falso y no cambia nada (+0,9 KB de binario).
+- `TestDefaultTailscaleSeams_NeverTouchHostInTests` verifica que en tests no se resuelve el binario del host y que ejecutar `/usr/local/bin/tailscale`, `/usr/bin/tailscale` o `tailscale` provoca el panic del guardia.
+- `TestSetupServerRouter_TailscaleEnableDisable_FakeCLIOnly`: cobertura con el router real usando sólo un script falso que registra sus argumentos. Con la API key, enable y disable devuelven 403 y el falso no recibe ninguna llamada. Con sesión de administrador, la secuencia corre contra el falso. Quitando el guardia, la prueba falla mostrando exactamente la secuencia del incidente.
+- También `POST /api/tunnel/tailscale-disable` (ejecuta `funnel --bg reset`) pasa a exigir administrador.
+- Regla operativa: Grok Bot nunca vuelve a ejecutar `tailscale serve`, `funnel`, `up`, `reset` ni equivalentes reales durante pruebas.
 
 ## 9. Mejoras de rendimiento medidas
 
