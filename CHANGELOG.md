@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- CI (VER-01): nuevo job `race` que ejecuta `go test -race -count=1 ./...` en paralelo con `test`. También se estabiliza `TestGateAcquire_SpacesConcurrentCallers`: el ruido de planificación al medir tras `Acquire` podía achicar un intervalo medido (35,5 ms contra un piso de 40 ms) sin que el gate fallara; ahora cada intervalo exige al menos el 50 % del piso y el lapso total conserva la garantía del 90 %.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
