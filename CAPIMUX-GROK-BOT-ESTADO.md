@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 06:20 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 09:22 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -25,6 +25,8 @@ Ciclo 4, de consolidación (instrucciones del dueño, 2026-10-30 03:04 UTC-3). S
 Ver «Consolidación (ciclo 4)» en la sección 6.
 
 Ciclo 5 (instrucciones del dueño, 2026-10-30 06:06 UTC-3): auditar el fallback entre proveedores, el catálogo de modelos/proveedores y el recomendador, en local y desde `origin/main` actualizado (`47d6e0ce`). Ver «Auditoría (ciclo 5)» en la sección 6.
+
+Ciclo 6 (instrucciones del dueño, 2026-10-30 09:07 UTC-3): limitar la importación y sobrescritura de credenciales de proveedores con API key de cliente, en la línea de #148, sin romper Workbuddy. Rama nueva desde `origin/main` (`47d6e0ce`), independiente de la cadena del updater. Ver «Credenciales con API key (ciclo 6)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -244,6 +246,30 @@ PR **#157** (`fix/fallback-catalog-audit-20261030`, base `main` `47d6e0ce`, sin 
 
 `-race` no detectó carreras en los paquetes tocados.
 
+### Credenciales con API key (ciclo 6)
+
+PR **#158** (`fix/client-credential-import-guard-20261030`, base `main` `47d6e0ce`, commits `2435942e` y `67bfd49e`, sin mergear).
+
+- **Causa.** Con login activo, una API key de cliente pasa `RequireDashboardAuth`, y las rutas de credenciales no distinguían entre esa key y el dueño. Con la key se podía:
+  - **sobrescribir** la key del dueño:
+    - con `POST /api/connections` + `allowOverwrite`/`overwrite` por nombre;
+    - con `PUT /api/connections|providers/{id}` + `data.apiKey` (#146 solo protegía los destinos);
+    - por los flujos OAuth que buscan la cuenta y actualizan la fila (kiro ×4, cursor/import, gitlab/pat, iflow/cookie, device/poll, pkce y authcode/exchange, antigravity, cline, trae, windsurf, zed, kimchi, xiaomi-mimo, freebuff/poll, codex cli-login/start y start-proxy);
+  - **crear** conexiones nuevas con `baseUrl` propio y prioridad 1, lo que captura el tráfico.
+- **Workbuddy.** `scripts/workbuddy-termux-bootstrap.sh` solo usa `POST /api/oauth/codebuddy-intl/import`.
+  - Lo hace con `Authorization: Bearer` (`NINEROUTER_API_KEY` o `~/.config/9router-go/admin-token`), que el router trata como API key de cliente.
+  - Esa ruta es solo-alta: id nuevo, sin destino, sin overwrite.
+- **Diseño.** Ajuste solo-admin `allowClientCredentialImport`, ajuste de postura como #148: la API key no puede cambiarlo.
+  - Ausente (default): quedan abiertas solo las altas por `/{provider}/import` y `codex/bulk-import` (compat Workbuddy); `POST /api/connections` → 403.
+  - `false`: todo cerrado.
+  - `true`: también `POST /api/connections`, pero sin destino.
+  - Sobrescribir queda cerrado siempre, sea cual sea el valor.
+  - Admin y `requireLogin=false` no cambian.
+  - Las rutas OAuth se cortan antes del handler, sin llamadas salientes.
+- No depende de #148. El conflicto esperado es trivial: una línea en `authPostureSettingKeys`; hay que conservar las dos.
+
+
+## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
 - Prueba de handler con `tailscale` simulado: un llamador no administrador nunca ejecuta comandos.
@@ -280,6 +306,25 @@ Ciclo 5 (#157, corrido localmente el 2026-10-30):
 - Build Termux `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./cmd/9router-go/`: OK (ELF aarch64).
 - Guard de Tailscale: `testing.Testing()` está en `tunnel.go` y no se definió `CAPIMUX_TEST_FAKE_TAILSCALE`. No se usaron APIs pagas, solo `httptest`.
 - CI de #157 en verde: `test` 2m28s, `Integration tests` 49s, `Build Docker image (verify only)` 1m45s.
+
+Ciclo 6 (#158, corrido localmente el 2026-10-30):
+- Test nuevo `internal/handlers/client_credential_import_test.go` con el router real:
+  - **falla sobre `main`**: allowOverwrite → 200 y pisa la key del dueño; alta con `baseUrl` → 200; con `false` igual importa; la API key puede activar el ajuste;
+  - **pasa con el cambio**. Cubre: admin (sesión y CLI) sí puede; API key sin el ajuste no puede; API key con el ajuste sí puede (solo-alta); sin escalada para sobrescribir en los 3 valores; `requireLogin=false` sin cambios; el request exacto de Workbuddy → 200.
+- Tests unitarios del diff de credenciales y destinos: `dashboard/credential_key_test.go`.
+- Los tests de handler que creaban conexiones sin credenciales ahora corren con `requireLogin=false` (helper `openDashboard`).
+- Integración: `TestConnectionLifecycle` y `TestConnectionNameConflictIsRefused` ahora crean y sobrescriben como dueño, y tienen un subtest negativo con API key. Ese subtest falla sobre `origin/main` (overwrite → 200).
+- Comandos corridos:
+  - `go build ./...` y `go vet ./...`: OK;
+  - `go test -count=1 ./...`: 44 paquetes ok;
+  - `go test -race` en handlers, dashboard, oauth, auth y middleware: OK;
+  - `go test -tags=integration -race` y `go vet -tags=integration`: OK;
+  - Termux android/arm64: OK (ELF aarch64).
+- Guard de Tailscale: `testing.Testing()` sigue activo y no se definió `CAPIMUX_TEST_FAKE_TAILSCALE`. Sin APIs pagas.
+- Inestabilidad: `TestGateAcquire_SpacesConcurrentCallers` (fetchgate) volvió a fallar una vez por temporización (34 ms vs. 40 ms). Pasó en la corrida siguiente; es el flaky preexistente.
+- CI de #158:
+  - con `2435942e`, `Integration tests` falló (no lo había corrido localmente);
+  - con `67bfd49e`: test 1m51s, Integration tests 43s, Docker verify 1m36s y multiagent 1m24s, todo en verde.
 
 ## 8. Errores encontrados y corregidos
 
@@ -335,8 +380,12 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 ## 12. Riesgos y asuntos pendientes
 
 - #157 (ciclo 5) no depende de nada: se puede mergear en cualquier momento, con merge commit.
+- #158 (ciclo 6) no depende de nada; con #148 hay un conflicto trivial en `authPostureSettingKeys` (conservar ambas líneas).
+- **Decisión del dueño (ciclo 6):**
+  - ¿El default de `allowClientCredentialImport` pasa a cerrado? Antes hay que migrar el bootstrap de Workbuddy a un camino admin, por ejemplo `x-9r-cli-token` en el mismo host.
+  - Con `true`, ¿forzamos que las conexiones creadas por API key queden últimas en la rotación?
 - Orden de merge (ciclo 4): ya se mergearon #145, #146, #147, #151 y #154. Faltan, independientes, #148 y #149, y la cadena #140 → #150 → #152 → #153 → #155 (cambiando la base de #155 a `main`), siempre con merge commit.
-- Pendiente: importación de credenciales con API key (`/api/oauth/codex/bulk-import`, usada por flujos tipo workbuddy). Requiere claves con alcance como #121.
+- Importación de credenciales con API key: acotada en #158 (ciclo 6). Sigue pendiente la decisión sobre el default.
 - Updater:
   - No hay auto-update hasta que el dueño publique el primer tag `v*` con el `release.yml` de #153. Mientras tanto, el updater responde «al día».
   - Un hash no garantiza autenticidad: quien controle el manifest controla el hash. El manifest firmado de #140 es el paso siguiente.
@@ -359,7 +408,9 @@ Corregidos y verificados: hallazgos 1 y 2 (#145, #146), la gestión de API keys 
 
 Ciclo 5: #157 corrige el fallback de cuentas en cooldown, los reintentos repetidos de los combos sobre la misma cuenta y la clasificación de Gemini 2.5. Está sin mergear y es independiente de la cadena del updater.
 
-Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 puede ir en cualquier momento). Después:
-- claves con alcance para la importación (#121);
+Ciclo 6: #158 impide que una API key de cliente sobrescriba credenciales, y las altas quedan bajo el opt-in `allowClientCredentialImport`. Workbuddy sigue funcionando. CI en verde, sin mergear.
+
+Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 y #158 pueden ir en cualquier momento). Después:
+- decidir el default de `allowClientCredentialImport` y migrar Workbuddy (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
