@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 12:30 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 13:40 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -31,6 +31,8 @@ Ciclo 6 (instrucciones del dueño, 2026-10-30 09:07 UTC-3): limitar la importaci
 Ciclo 7 (decisión del dueño sobre #158, 2026-10-30 10:01 UTC-3): las API keys de cliente operan con privilegios mínimos y el token administrativo controla credenciales, conexiones, provider nodes y prioridades. Pasos: migrar Workbuddy al token admin, restringir la API key, forzar que sus altas queden últimas en la rotación y activar el default cerrado. Todo dentro de #158 (misma rama, commits nuevos, sin force-push). Ver «Privilegios mínimos de API key (ciclo 7)» en la sección 6.
 
 Ciclo 8 (2026-10-30 12:12 UTC-3): auditoría del recomendador de combos y del descubrimiento/actualización del catálogo free, desde origin/main `47d6e0ce`, sin repetir lo de #157. Dos defectos verificados, cada uno en su PR independiente: #159 y #160. Ver «Auditoría (ciclo 8)» en la sección 6.
+
+Ciclo 9 (decisiones del dueño, 2026-10-30 12:57 UTC-3, aplicadas sin volver a consultar): cinco decisiones sobre lo documentado en el ciclo 8 y sobre #158. Variantes duplicadas del catálogo y respuestas 200 vacías de models.dev (#161), poda de combos generados y orden por versión (#162, sobre #159) y conexiones solo-admin (commit nuevo en #158). Ver «Decisiones del dueño (ciclo 9)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -311,6 +313,52 @@ Dos PR nuevos hacia `main`, ramas nuevas desde origin/main `47d6e0ce`, sin merge
   - `shouldReplacePricing` y `ownedByAdapter` del orquestador.
 - Documentado, no corregido (ver sección 12): colisiones de `catalog_sync.go`, cuerpo 200 vacío, claves faltantes en Cline/unorouter, combos de familia que quedan viejos, orden alfabético de miembros.
 
+### Decisiones del dueño (ciclo 9)
+
+Sin merges. Un commit por decisión, con tests de regresión que fallan sin el cambio y tests negativos.
+
+1. **Variantes duplicadas en `catalog_sync.go`** — #161 `fix/catalogo-variantes-y-respuestas-vacias-20261030`, commit `81039c25`: https://github.com/joselofarias-byte/capimux/pull/161
+   - Por cada clave base se conserva la variante entera: los límites y modalidades salen de un mismo id, sin mezclar.
+   - Orden de elección: disponible (no `deprecated`) → mayor contexto → capacidad (salida, modalidades de entrada, tool calling) → estabilidad (GA > beta > alpha) → menor costo (sin costo declarado al final) → id.
+   - Las demás variantes quedan por separado en el campo aditivo `variants` (por id exacto), incluidas las `:free`. `GetCatalogLimits`/`GetCatalogModalities` las consultan primero.
+   - Resultado de los 137 casos (feed real, 20 corridas antes y después):
+     - claves que cambian entre corridas: 137/137 → 0;
+     - corridas que no siguen la regla: 1411/2740 → 0;
+     - catálogos distintos: 20 → 1;
+     - variantes alternativas conservadas con sus propios valores: 231/231.
+   - Criterio que decidió cada clave: contexto 69, salida 26, id (empate total) 15, costo 13, disponibilidad 10, modalidades 4.
+   - En 9 de los 16 grupos con `:free` ganó la variante free.
+2. **200 vacío o inválido de models.dev** — #161, commit `6505a2c0`.
+   - `null`, `{}`, cuerpo vacío, sin modelos, sin límites ni modalidades o estructura inválida no reemplazan el catálogo.
+   - Se conservan la memoria, la caché (byte a byte) y el ETag. El incidente queda en `lastError` («catálogo rechazado: …») y en un aviso de log. Se reintenta.
+   - La caché se escribe en un temporal y se renombra antes de publicar en memoria.
+   - En el descubrimiento: un feed vacío de models.dev y la clave `free`/`data` ausente o `null` de Cline/unorouter son error.
+3. **Combos generados obsoletos** — #162 `feat/combos-generados-poda-y-orden-20261030`, commit `16563e1a`: https://github.com/joselofarias-byte/capimux/pull/162
+   - Los generadores registran lo que escriben (kv `generatedCombos`).
+   - Al regenerar se borran los generados sin tocar que quedaron con menos de 2 modelos válidos y disponibles (`pruned` en la respuesta).
+   - Los editados, manuales o anteriores al registro no se borran: `GET /api/combos` los marca con `needsReview`/`reviewReason`/`unavailableModels`.
+   - auto-free con menos de 2 modelos responde 409 en español.
+4. **Orden por versión semántica** — #162, commit `8513d3b6`.
+   - Comparación numérica por componente (4.10 > 4.9), con una regla explícita de qué token es versión: fechas, snapshots y sufijos no cuentan.
+   - Los modelos sin versión van al final; desempate por la clave `alias/modelo`.
+5. **Conexiones solo-admin** — #158, commit nuevo `1803b22a` (sin force-push).
+   - Pasan a solo-admin, en el backend:
+     - `PUT /api/connections/{id}` y `/api/providers/{id}` (nombre, `isActive`, `assignedModel`, todo);
+     - los `…/test` de conexiones, que guardan estado;
+     - el consumo de créditos de reinicio;
+     - proxy pools (alta, edición, borrado y test);
+     - `freebuff/session/switch`.
+   - La API key sigue pudiendo usar conexiones e inferir, y `GET /api/connections`.
+   - Workbuddy no se ve afectado, porque ya importa con el token admin desde el ciclo 7.
+
+Dependencias y orden de merge:
+- #159 → #162 (#162 incluye los commits de #159).
+- #158, #160 y #161 son independientes.
+- `git merge-tree`:
+  - #162 sin conflictos con #158 ni con #161;
+  - #161 sin conflictos con #158, #159 ni #160;
+  - #162 con #160: solo `CHANGELOG.md`, el mismo conflicto que #159 ya tiene con #160 (conservar ambas entradas).
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -398,6 +446,34 @@ Ciclo 8 (#159 y #160, corrido localmente el 2026-10-30):
   - #159: todo en verde a la primera (test 1m49s, Integration 41s, Docker verify 1m27s, Vercel).
   - #160: el primer intento falló en `TestHandleGetConnectionUsage_SpacesAntigravityBurst` (dashboard, test de tiempos: 35 ms entre lecturas, esperaba ≥ 40 ms). El PR no toca ese paquete. Se re-corrió el job y quedó todo en verde (test 2m11s, Integration 41s, Docker verify 1m42s, Vercel).
 
+Ciclo 9 (corrido localmente el 2026-10-30, con el mismo script en cada rama):
+- Tests nuevos (cada uno verificado fallando sin su cambio):
+  - #161:
+    - `catalog_variants_test.go`: fixture real de models.dev, determinismo, `TestBetterCatalogCandidate` e ida y vuelta por archivo;
+    - `catalog_sync_reject_test.go`: 8 cuerpos rechazados, con caché, memoria y ETag intactos;
+    - `discovery/empty_response_test.go`: Cline, unorouter y models.dev.
+  - #162:
+    - `combos_prune_test.go`, 7 tests (poda, editado, legado, manuales, auto-free 409, borrado del registro);
+    - `combos_version_test.go`: 20 casos de `modelVersion`, 4.10 > 4.9, fechas, 50 permutaciones, y los dos endpoints;
+    - tres tests de auto-free pasaron de bazaarlink (1 modelo free) a opencode (2).
+  - #158:
+    - `TestClientKeyCannotChangeConnectionConfigOrState`: 15 endpoints × 3 valores del ajuste; falla en 15 casos sobre `d216bb75`;
+    - `TestAdminTokenChangesConnectionConfigAndState`;
+    - se actualizaron 3 tests de handlers y la integración `TestConnectionLifecycle`;
+    - los 3 tests de Workbuddy pasan.
+- En cada rama, todo OK:
+  - `go build ./...`, `go vet ./...` y `go vet -tags=integration`;
+  - `go test -count=1 ./...`;
+  - `-race`:
+    - #161: providers y discovery;
+    - #162: dashboard y db;
+    - #158: handlers, dashboard, auth y middleware;
+  - `go test -tags=integration -race`;
+  - build Termux android/arm64 (ELF, e_machine 0xb7).
+- Guard de Tailscale: `testing.Testing()` en `tunnel.go` (líneas 54 y 64) y sin `CAPIMUX_TEST_FAKE_TAILSCALE`.
+- Solo GETs públicos gratuitos a models.dev (para el análisis de los 137 casos) y stubs httptest. No se tocó el teléfono.
+- CI: ver la sección 14.
+
 ## 8. Errores encontrados y corregidos
 
 - Escalada de privilegios API key → administrador del panel (hallazgo 1): corregido y verificado.
@@ -450,6 +526,12 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 - Ciclo 7: el script de Workbuddy deriva el token CLI localmente en vez de guardar una copia, así no queda otro secreto en disco. Las altas por API key reciben una prioridad explícita (última) para no depender del desempate por `updatedAt` entre filas NULL.
 - Guardia Tailscale: el test falla con un panic en vez de saltearse en silencio. Si una regresión intenta tocar el host, se ve.
 
+- Ciclo 9:
+  - un combo es «generado» solo mientras su fila coincide con lo que escribió el generador; ante la duda (editado o sin registro) se trata como configuración del usuario y no se borra;
+  - la validez para revisión es indulgente (proveedor activo y modelo no deshabilitado, sin exigir que el modelo esté en el catálogo), para no marcar modelos custom o más nuevos;
+  - el orden por versión solo reconoce tokens con una regla escrita; lo que no la cumple queda sin versión, en vez de adivinar;
+  - las variantes del catálogo se guardan enteras y por id exacto, nunca mezclando campos de distintas variantes.
+
 ## 12. Riesgos y asuntos pendientes
 
 - #157 (ciclo 5) no depende de nada: se puede mergear en cualquier momento, con merge commit.
@@ -472,7 +554,7 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 - Ciclo 5 (#157): `gemini-2.0-flash` sigue clasificado solo como STT, igual que en el registro upstream. Si se quiere ofrecer como chat, es una decisión de catálogo.
 - `fallback.go` tiene una línea en blanco doble preexistente que `gofmt` marca. No se tocó, para mantener el diff mínimo.
 
-- Ciclo 8, decisiones y riesgos (documentados, sin cambios):
+- Ciclo 8, decisiones y riesgos (documentados en el ciclo 8; los cinco primeros los resolvió el dueño en el ciclo 9 → #161, #162 y #158):
   - `providers/catalog_sync.go` indexa límites y modalidades por id base y se queda con la primera variante según el orden del mapa. Con el catálogo real hay 137 colisiones con límites o modalidades distintos (p. ej. 32768 contra 131072 de contexto). Elegir qué variante vale es una decisión de catálogo.
   - Si models.dev responde 200 con `null` o `{}`, el catálogo en memoria se reemplaza y la caché en disco se sobrescribe vacía.
   - Los adaptadores Cline y unorouter toman un 200 sin la clave `free`/`data` como catálogo vacío autoritativo y desactivan todos sus modelos. No se observó en la práctica.
@@ -481,6 +563,20 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
   - `GetConnectedProviders` quedó sin uso tras #159; no se borró.
   - `TestHandleGetConnectionUsage_SpacesAntigravityBurst` es sensible a tiempos en CI (igual que el flaky conocido de fetchgate).
   - El loop de orcarouter hace `defer resp.Body.Close()` dentro del loop (menor).
+
+- Ciclo 9, riesgos y pendientes:
+  - Casos dudosos del catálogo, que deciden las reglas de la decisión 1:
+    - `thinkingmachines` `kimi-k2.6` con `:peft:N` (131072 contra 32768);
+    - la variante con visión de deepseek en nearai;
+    - `openrouter` `nemotron-3-ultra`: la free tiene 1M y la paga 262144, así que una búsqueda por id base devuelve 1M (la paga, por id exacto, da 262144);
+    - `laguna-s-2.1`, con ambas variantes `deprecated`.
+  - #162:
+    - la poda ocurre solo al regenerar, no al desactivar una conexión;
+    - regenerar sigue sobrescribiendo el combo con el id generado (comportamiento previo);
+    - los combos generados antes de #162 no tienen registro, así que no se podan hasta la próxima regeneración;
+    - `HandleUpdateCombo` no guarda `strategy` si la columna no existe en el esquema (preexistente, no se tocó).
+  - #158: los clientes que renombraban, activaban o probaban conexiones con API key ahora reciben 403 (documentado en `CHANGELOG.md` y `docs/WORKBUDDY.md`).
+  - Flakes de tiempos en CI del paquete dashboard (usage throttle): `TestHandleGetConnectionUsage_SpacesBurstAcrossConnections` se sumó a los ya conocidos.
 
 ## 13. Participación de otros modelos
 
@@ -498,7 +594,9 @@ Ciclo 7: dentro de #158, Workbuddy importa con el token admin local, la API key 
 
 Ciclo 8: #159 (el recomendador de combos ya no sugiere modelos deshabilitados ni de proveedores sin conexión activa) y #160 (el descubrimiento de models.dev conserva de forma estable los carriles `:free`). Independientes entre sí y de los demás, CI en verde, sin mergear.
 
-Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 y #158 pueden ir en cualquier momento). Después:
+Ciclo 9: las cinco decisiones del dueño quedaron aplicadas en #161 (decisiones 1 y 2), #162 (decisiones 3 y 4, depende de #159) y #158 (decisión 5, commit `1803b22a`). CI en verde: #158 (`1803b22a`): test 2m29s, Integration 50s, Docker verify 1m47s, multiagent 1m45s; #161 (`6505a2c0`): test 2m39s tras re-correr un flake de tiempos de dashboard, Integration 42s, Docker verify 1m39s; #162 (`8513d3b6`): test 1m56s, Integration 43s, Docker verify 1m30s, a la primera. Sin mergear.
+
+Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
 - probar el script de Workbuddy migrado en Termux (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
