@@ -359,6 +359,101 @@ Dependencias y orden de merge:
   - #161 sin conflictos con #158, #159 ni #160;
   - #162 con #160: solo `CHANGELOG.md`, el mismo conflicto que #159 ya tiene con #160 (conservar ambas entradas).
 
+### Merges autorizados y bug de strategy (ciclo 10, vinculado al ciclo 9)
+
+José Luis autorizó por escrito (30/10, 13:42 UTC-3) solo estos cinco merges, en este orden, con merge commit (sin squash, sin rebase y sin force-push). No se borraron ramas a mano y no hubo tags, releases, deploys ni imágenes.
+
+| Orden | PR | Head mergeado | Merge commit en main | Hora (UTC-3) |
+|---|---|---|---|---|
+| 1 | #158 | `1803b22a` | `bf15b250577cdb9272a4011a8e910c3747a950a9` | 13:42 |
+| 2 | #161 | `2ae0ac6c` | `3bc3929b919a7fb8bca16aceda7ce3e0c8471e73` | 14:02 |
+| 3 | #159 | `52b732be` | `522d683fe906e457eac63361af76a06f872f9317` | 14:08 |
+| 4 | #162 | `0a39f129` | `c84327727711f9bb42d817637c8893afc3f24438` | 14:18 |
+| 5 | #160 | `9435776f` | `34a2fcd603ebc77e4109eeb889459c7e3af39c78` | 14:32 |
+
+Actualizaciones de rama (todas por `git merge origin/main`, sin rebase):
+- #161: merge de main (post-#158), sin conflictos.
+- #159: merge de main (post-#161), sin conflictos.
+- #162:
+  - merge de main (post-#159), sin conflictos;
+  - la base ya era `main`;
+  - el diff contra main quedó exactamente con los dos commits propios: `16563e1a` y `8513d3b6`.
+- #160:
+  - merge de main (post-#162) con conflicto solo en `CHANGELOG.md`;
+  - se resolvió conservando todas las entradas: primero las de #159 y #162 que ya estaban en main, y después la de #160;
+  - el diff de `CHANGELOG.md` contra main quedó solo con la entrada de #160.
+
+CI en verde sobre el head mergeado de cada PR:
+
+| PR | test | Integration | Docker verify | Otros |
+|---|---|---|---|---|
+| #158 | 2m29s | 50s | 1m47s | multiagent 1m45s |
+| #161 | 2m29s | 50s | 1m33s | — |
+| #159 | 2m42s | 48s | 2m25s | — |
+| #162 | 2m27s | 52s | 2m07s | — |
+| #160 | 1m44s | 44s | 1m25s | — |
+
+En #161 hubo un re-run único de `TestHandleGetConnectionUsage_SpacesBurstAcrossConnections`, el flake de tiempos conocido.
+
+Batería sobre main local después de cada merge (`/tmp/mainverify.sh`, `HOME=/home/box`). Pasos:
+- guard de tailscale verificado: la variable fake tiene 0 usos y `testing.Testing()` está en `tunnel.go`;
+- `go build`;
+- `go vet ./...` y `go vet -tags=integration ./...`;
+- `go test -count=1 ./...`;
+- `go test -race` en handlers, providers y controlplane;
+- `go test -tags=integration -race ./internal/integration/...`;
+- 403 de admin con API key: `TestClientKeyCannotRunAdminOperations`, `TestClientKeyCannotChangeConnectionConfigOrState`, `TestClientKeyCredentialCreationNeedsAdminOptIn` y `TestAdminTokenChangesConnectionConfigAndState`;
+- desde #162, el 409 de auto-free con un solo modelo: `TestAutoFreePrunesGeneratedComboBelowTwoModels` (afirma `StatusConflict` y el mensaje en español), `TestAutoFreeComboSkipsInactiveConnectionsAndDisabledModels` y `TestAutoFreeKeepsEditedCombo`;
+- build Termux (ELF aarch64, `b7`).
+
+Resultados:
+- post-#158 (`bf15b250`): todo OK.
+- post-#161 (`3bc3929b`):
+  - `go test ./...` falló una vez en `TestGateAcquire_SpacesConcurrentCallers` de fetchgate («32.46ms … want >= 40ms»), el flake de tiempos conocido; se re-corrió una vez el paquete y pasó;
+  - lo demás OK.
+- post-#159 (`522d683f`): todo OK.
+- post-#162 (`c8432772`): todo OK, incluidos el 403 y el 409.
+- post-#160 (`34a2fcd6`):
+  - el `-race` de handlers falló una vez en `TestHandleGetConnectionUsage_SpacesBurstAcrossConnections`, el flake conocido; se re-corrió una vez el paquete y pasó;
+  - lo demás OK, incluidos el 403 y el 409.
+
+CHANGELOG: se comparó cada línea que agrega cada merge (`git diff <merge>^1 <merge> -- CHANGELOG.md`) contra el `CHANGELOG.md` de main `34a2fcd6`.
+
+| PR | Líneas presentes |
+|---|---|
+| #158 | 11/11 |
+| #161 | 2/2 |
+| #159 | 1/1 |
+| #162 | 2/2 |
+| #160 | 1/1 |
+
+No faltó ninguna y no quedan marcadores de conflicto.
+
+Bug de strategy: PR independiente, **sin mergear**: #163 `fix/combo-strategy-persistencia-20261030`, commit `fa759c44`, desde main `34a2fcd6`: https://github.com/joselofarias-byte/capimux/pull/163
+- Causa:
+  - `Repo.CreateCombo` y `UpdateCombo` escribían en una columna `strategy` que el esquema real de `combos` no tiene, y descartaban el error;
+  - el GET y el router leen `settings.comboStrategies[nombre]`.
+- Arreglo:
+  - la estrategia se persiste en `settings.comboStrategies`;
+  - un PUT sin `strategy` no la toca;
+  - renombrar mueve la entrada;
+  - regenerar auto-free y auto-family ya no la resetea;
+  - un valor inválido devuelve 400 en español. Valores válidos: `fallback`, `first-model`, `round-robin`, `roundrobin`, `sticky`, `capacity` y `fusion`.
+- Tests:
+  - `internal/db`, con una DB real en disco, migraciones y cierre y reapertura:
+    - `TestComboStrategyPersistsAcrossReopen`;
+    - `TestComboStrategyUntouchedByOtherEdits`;
+    - `TestComboStrategyFallbackReadsBackWithGlobalDefault`;
+    - `TestIsValidComboStrategy`.
+  - HTTP:
+    - `TestUpdateComboStrategyPersists`: guardar, GET, y recargar la DB con un router nuevo;
+    - `TestComboStrategyRejectsInvalidValue`: 400 al crear y al editar, y la estrategia no cambia;
+    - `TestUpdateComboOtherFieldsKeepStrategy`;
+    - `TestRegenerateKeepsGeneratedComboStrategy`.
+  - Con el código de main `34a2fcd6` fallan los 7 tests de persistencia y de rechazo; el de validación no compila sin el cambio. Con el arreglo pasan los 8.
+- Batería completa en la rama: todo OK (incluidos el 403 y el 409, Termux `b7`) y `bun test` 117/117.
+- CI #163 en verde a la primera: test 1m55s, Integration 1m11s, Docker verify 1m47s.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -596,7 +691,9 @@ Ciclo 8: #159 (el recomendador de combos ya no sugiere modelos deshabilitados ni
 
 Ciclo 9: las cinco decisiones del dueño quedaron aplicadas en #161 (decisiones 1 y 2), #162 (decisiones 3 y 4, depende de #159) y #158 (decisión 5, commit `1803b22a`). CI en verde: #158 (`1803b22a`): test 2m29s, Integration 50s, Docker verify 1m47s, multiagent 1m45s; #161 (`6505a2c0`): test 2m39s tras re-correr un flake de tiempos de dashboard, Integration 42s, Docker verify 1m39s; #162 (`8513d3b6`): test 1m56s, Integration 43s, Docker verify 1m30s, a la primera. Sin mergear.
 
-Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
+Ciclo 10: mergeados con autorización escrita #158, #161, #159, #162 y #160 (SHA en la sección 6, «ciclo 10»). Main queda en `34a2fcd6`, verificado. #163 (persistencia de `strategy`) tiene la CI en verde y queda sin mergear.
+
+Siguiente prioridad (actualizada en el ciclo 10): #163 y #157 a decisión del dueño; #156 sin mergear. Antes era: que el dueño revise y mergee en el orden indicado (#157, #158, #160 y #161 pueden ir en cualquier momento; #159 antes que #162). Después:
 - probar el script de Workbuddy migrado en Termux (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
