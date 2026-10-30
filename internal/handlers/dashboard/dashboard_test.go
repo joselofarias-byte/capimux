@@ -113,6 +113,7 @@ func keysOf(m map[string]any) []string {
 
 func TestConnectionsEndpoints(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 
@@ -711,5 +712,17 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save disabled models with disabledModels format expected 200, got %d", rec.Code)
+	}
+}
+
+// openDashboard sets requireLogin=false, the owner's "open dashboard" mode.
+// Handler-level tests call handlers without the auth middleware or any
+// credential; with login on (the default) the client-key guards would treat
+// them as a bare client API key. Tests of those guards build their own
+// sessions, CLI tokens and keys.
+func openDashboard(t *testing.T, repo *db.Repo) {
+	t.Helper()
+	if err := repo.UpdateSettingsRaw(map[string]any{"requireLogin": false}); err != nil {
+		t.Fatalf("open dashboard: %v", err)
 	}
 }

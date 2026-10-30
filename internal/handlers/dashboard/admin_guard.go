@@ -31,6 +31,9 @@ var authPostureSettingKeys = []string{
 	// Opt-in that lets client API keys manage other keys; a key must not be
 	// able to grant itself that.
 	clientKeyManagementSetting,
+	// Opt-in that lets client API keys add provider credentials; a key must
+	// not be able to grant itself that.
+	auth.ClientCredentialImportSetting,
 }
 
 // isAdminRequest reports whether the caller holds an administrative credential:
