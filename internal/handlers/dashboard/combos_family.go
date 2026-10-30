@@ -57,7 +57,7 @@ func (h *DashboardHandler) HandleAutoFamilyCombos(w http.ResponseWriter, r *http
 				handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-		} else if err := h.Repo.UpdateCombo(id, name, autoFamilyComboKind, string(modelsJSON), "fallback"); err != nil {
+		} else if err := h.Repo.UpdateCombo(id, name, autoFamilyComboKind, string(modelsJSON), ""); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

@@ -172,15 +172,25 @@ func (r *Repo) CreateCombo(id, name, kind, modelsJSON, strategy string) error {
 	if err != nil {
 		return fmt.Errorf("create combo %s: %w", id, err)
 	}
+	// The combos table has no strategy column: a combo's routing strategy
+	// lives in settings.comboStrategies, keyed by name, which is where the
+	// router and GetCombo* read it from.
 	if strategy != "" {
-		// Update strategy if column exists in the schema
-		_, _ = r.db.Exec(`UPDATE combos SET strategy = ? WHERE id = ?`, strategy, id)
+		if err := r.persistComboStrategy(name, name, strategy, true); err != nil {
+			return fmt.Errorf("create combo %s: strategy: %w", id, err)
+		}
 	}
 	return nil
 }
 
-// UpdateCombo updates an existing combo routing configuration.
+// UpdateCombo updates an existing combo routing configuration. An empty
+// strategy leaves the combo's current strategy untouched; a rename carries the
+// combo's strategy entry over to the new name.
 func (r *Repo) UpdateCombo(id, name, kind, modelsJSON, strategy string) error {
+	var oldName string
+	if err := r.db.QueryRow(`SELECT name FROM combos WHERE id = ?`, id).Scan(&oldName); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("update combo %s: read name: %w", id, err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	var kindVal any
 	if kind != "" {
@@ -193,9 +203,13 @@ func (r *Repo) UpdateCombo(id, name, kind, modelsJSON, strategy string) error {
 	if err != nil {
 		return fmt.Errorf("update combo %s: %w", id, err)
 	}
-	if strategy != "" {
-		// Update strategy if column exists in the schema
-		_, _ = r.db.Exec(`UPDATE combos SET strategy = ? WHERE id = ?`, strategy, id)
+	if oldName == "" {
+		oldName = name
+	}
+	if strategy != "" || oldName != name {
+		if err := r.persistComboStrategy(oldName, name, strategy, false); err != nil {
+			return fmt.Errorf("update combo %s: strategy: %w", id, err)
+		}
 	}
 	return nil
 }
