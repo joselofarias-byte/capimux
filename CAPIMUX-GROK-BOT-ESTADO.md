@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-29, 23:45 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 03:35 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -14,6 +14,15 @@ Ciclo 3 (instrucciones del dueño, 2026-10-29 23:05 UTC-3), con desarrollo conti
 - `fork_defaults.go` y otras referencias al repositorio viejo;
 - publicar `sha256s` por plataforma en `release.yml`/`version.json`;
 - seguir auditando fallback, reintentos y rate limits, y catálogo/recomendador.
+
+Ciclo 4, de consolidación (instrucciones del dueño, 2026-10-30 03:04 UTC-3). Se pidió:
+- verificar qué se mergeó;
+- revisar #155;
+- actualizar contra `main` las ramas abiertas propias, solo con merge (sin rebase ni force-push);
+- correr build, vet, tests, `-race`, integración y Termux;
+- analizar los solapamientos del updater.
+
+Ver «Consolidación (ciclo 4)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -125,6 +134,72 @@ PR #154: `internal/handlers/chat/fallback.go`, `retry_after.go`, `numeric_retry_
 
 Ningún merge, push a `main`, force-push ni borrado de ramas.
 
+### Consolidación (ciclo 4)
+
+**Mergeados en `main`** (según `gh pr list --state all`, horas en UTC-3 del 29/10):
+
+| PR | Hora del merge |
+|----|----------------|
+| #145 | 23:40 |
+| #146 | 23:40 |
+| #147 | 23:44 |
+| #151 | 23:44 |
+| #154 | 23:44 |
+
+`main` = `47d6e0ce`. Este informe ya estaba en `main` vía #145. Esta actualización va en la rama `docs/estado-consolidacion-20261030`.
+
+**Ramas propias actualizadas** con `git merge origin/main`: sin conflictos (CHANGELOG automerge, sin entradas duplicadas), sin rebase ni force-push. Antes del merge estaban 20–23 commits detrás de `main`.
+
+| PR | Nuevo head | Notas |
+|----|------------|-------|
+| #148 | `10ded974` | |
+| #149 | `d46fe0d5` | Incluye un test nuevo (ver más abajo) |
+| #150 | `da49618b` | |
+| #152 | `c2032c28` | |
+| #153 | `13db3bf3` | |
+
+**No se pushearon:**
+- **#140** (draft): por la instrucción previa de no tocar su rama. Se probó el merge con `main` en local.
+- **#155**: rama `fix/capimux-ghcr-release` del mismo usuario, abierta por otra sesión y no por este ciclo. Solo se analizó y se probó en local.
+
+**Verificación local** (worktree por PR, sobre el merge con `main`, con el guard Tailscale presente en todos y `CAPIMUX_TEST_FAKE_TAILSCALE` sin definir):
+- Comandos: `go build ./...`, `go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...`, `-tags integration ./internal/integration/` y `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...`.
+- Todo OK en #148, #149, #150, #152, #153 y #155.
+- **#140**: la primera corrida falló en dos tests de temporización fuera de su diff:
+  - `fetchgate` `JitterOnlyWidensTheGap` (24 ms contra 27 ms), ya corregido en #149 y todavía no en `main`;
+  - con `-race`, `dashboard` `SpacesAntigravityBurst` (35,9 ms contra 40 ms).
+  - Al repetirlas, 2/2 corridas de test y 2/2 de race pasaron.
+
+**Nuevo en #149:** `assertSpaced` (`usage_throttle_test.go`) mide desde la primera lectura y tolera medio piso de ruido de entrega.
+- `-race -count=20` OK; dos corridas de `-race ./...` completas OK.
+- Con `fetchgate.New(0,0)`, los dos tests de espaciado fallan: siguen detectando ráfagas.
+
+**CI real tras el push** (03:24 UTC-3): #148, #149 (incluido el race), #150, #152 y #153 en verde (test, integración y Docker). #155 no tiene CI porque su base no es `main`; solo corre Vercel.
+
+**Solapamientos del updater:**
+- Cadena de ancestros: `#140 ⊂ #150 ⊂ #153`, `#152 ⊂ #153` y `#153 ⊂ #155`. #155 = #153 + 1 commit en `release.yml`.
+- Archivos compartidos:
+  - `internal/updater/updater.go`: #140, #150, #152 y #153;
+  - `checksum_guard*`, `signed_manifest*` y `docs/security/GROK-004-OPS-01.md`: #140, #150 y #153;
+  - `fork_defaults.go`, `fork_repo_rename_test.go`, `docs/SELF_UPDATE_POLICY.md` y `scripts/bootstrap-codex-audit.sh`: #152 y #153;
+  - `release.yml`: #153 y #155.
+- Orden recomendado, siempre con merge commit (no squash, porque rompería la cadena y duplicaría cambios):
+  1. #140 (sacarlo de draft);
+  2. #150;
+  3. #152;
+  4. #153;
+  5. cambiar la base de #155 a `main`, esperar su CI y mergearlo.
+- Alternativa: mergear solo #153 (contiene #140, #150 y #152) y cerrar esas tres como incluidas. #140 aparecería como mergeado automáticamente, porque su head es ancestro.
+
+**#155** (`release.yml`): cambia `REGISTRY_IMAGE` a `ghcr.io/joselofarias-byte/capimux`, usa `GITHUB_TOKEN` y agrega `needs: binaries`. actionlint OK. Observaciones:
+- El tag `latest` (`enable={{is_default_branch}}`) no se publica en un push de tag. Es comportamiento previo.
+- El primer paquete GHCR queda privado hasta que el dueño lo haga público.
+- `README.md:138` sigue diciendo `luqmenul/9router-go:latest`.
+
+**Independientes:** #148 (lo de #145 que incluía ya está en `main`) y #149.
+
+**Candidatos a cerrar:** ninguno está vacío. Solo serían redundantes #140, #150 y #152 si se elige mergear únicamente #153.
+
 ## 7. Pruebas ejecutadas y resultados
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -207,10 +282,7 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 
 ## 12. Riesgos y asuntos pendientes
 
-- Orden de merge:
-  - #145 → #146 y #148;
-  - #140 → #150, y #152 → #153.
-  - #147, #149, #151 y #154 son independientes.
+- Orden de merge (ciclo 4): ya se mergearon #145, #146, #147, #151 y #154. Faltan, independientes, #148 y #149, y la cadena #140 → #150 → #152 → #153 → #155 (cambiando la base de #155 a `main`), siempre con merge commit.
 - Pendiente: importación de credenciales con API key (`/api/oauth/codex/bulk-import`, usada por flujos tipo workbuddy). Requiere claves con alcance como #121.
 - Updater:
   - No hay auto-update hasta que el dueño publique el primer tag `v*` con el `release.yml` de #153. Mientras tanto, el updater responde «al día».
