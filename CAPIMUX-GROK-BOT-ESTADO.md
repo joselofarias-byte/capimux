@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 09:22 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 10:20 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -27,6 +27,8 @@ Ver «Consolidación (ciclo 4)» en la sección 6.
 Ciclo 5 (instrucciones del dueño, 2026-10-30 06:06 UTC-3): auditar el fallback entre proveedores, el catálogo de modelos/proveedores y el recomendador, en local y desde `origin/main` actualizado (`47d6e0ce`). Ver «Auditoría (ciclo 5)» en la sección 6.
 
 Ciclo 6 (instrucciones del dueño, 2026-10-30 09:07 UTC-3): limitar la importación y sobrescritura de credenciales de proveedores con API key de cliente, en la línea de #148, sin romper Workbuddy. Rama nueva desde `origin/main` (`47d6e0ce`), independiente de la cadena del updater. Ver «Credenciales con API key (ciclo 6)» en la sección 6.
+
+Ciclo 7 (decisión del dueño sobre #158, 2026-10-30 10:01 UTC-3): las API keys de cliente operan con privilegios mínimos y el token administrativo controla credenciales, conexiones, provider nodes y prioridades. Pasos: migrar Workbuddy al token admin, restringir la API key, forzar que sus altas queden últimas en la rotación y activar el default cerrado. Todo dentro de #158 (misma rama, commits nuevos, sin force-push). Ver «Privilegios mínimos de API key (ciclo 7)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -268,6 +270,25 @@ PR **#158** (`fix/client-credential-import-guard-20261030`, base `main` `47d6e0c
   - Las rutas OAuth se cortan antes del handler, sin llamadas salientes.
 - No depende de #148. El conflicto esperado es trivial: una línea en `authPostureSettingKeys`; hay que conservar las dos.
 
+### Privilegios mínimos de API key (ciclo 7)
+
+Mismo PR **#158**, commits nuevos `78ad5194`, `8270eb76` y `d216bb75`, sin mergear.
+
+- **Migración de Workbuddy (`78ad5194`).**
+  - El bootstrap importa con `x-9r-cli-token`. Lo deriva localmente de `machine-id` + `auth/cli-secret` del `DATA_DIR` del router (`NINEROUTER_DATA_DIR`, luego `DATA_DIR`, luego `~/.9router`).
+  - No lo imprime ni lo pasa en argv: usa un archivo de headers temporal `0600`.
+  - Rechaza archivos con permisos abiertos a grupo u otros.
+  - La API key de cliente queda solo para la prueba de `/chat/completions`.
+  - En Termux: actualizar el script y correrlo con el mismo usuario y dispositivo que 9router-go, exportando `DATA_DIR` si no es el estándar.
+- **Restricciones (`8270eb76`), solo-admin:**
+  - `DELETE` de conexiones/providers y `POST …/reorder`;
+  - `PUT` que cambia `priority`;
+  - CRUD de `/api/provider-nodes`.
+  - Las altas con API key (`POST /api/connections`, `/{provider}/import`, `codex/bulk-import`) van siempre al final de la rotación (`LastConnectionPriority`, que cuenta las filas NULL como 999999).
+- **Default cerrado (`d216bb75`).** `allowClientCredentialImport` ausente o `false`: cerrado. `true`: solo altas sin destino, al final.
+- **Reversión.** Un admin pone `allowClientCredentialImport=true` (panel o `PATCH /api/settings` con el token admin), o se usa un build previo a #158. Está en `docs/WORKBUDDY.md` y el CHANGELOG.
+- Sigue permitido con API key: renombrar, activar o desactivar y asignar modelo. No estaba en la lista del dueño; no se amplió el alcance.
+
 
 ## 7. Pruebas y verificación
 
@@ -326,6 +347,26 @@ Ciclo 6 (#158, corrido localmente el 2026-10-30):
   - con `2435942e`, `Integration tests` falló (no lo había corrido localmente);
   - con `67bfd49e`: test 1m51s, Integration tests 43s, Docker verify 1m36s y multiagent 1m24s, todo en verde.
 
+Ciclo 7 (#158, corrido localmente el 2026-10-30):
+- Tests nuevos, cada uno verificado fallando sin su cambio:
+  - `TestWorkbuddyBootstrapImportsWithAdminToken`: con el ajuste ausente y en `false`. Corre el script real contra el router real con un upstream stub y sin red. El script de main da 403;
+  - `TestWorkbuddyBootstrapWithoutAdminTokenFailsClearly` y `TestWorkbuddyBootstrapRefusesOpenTokenFiles`;
+  - `TestClientKeyCannotRunAdminOperations`: 9 operaciones con API key, en los 3 valores del ajuste, responden 403; la rotación y los nodos no cambian;
+  - `TestAdminTokenRunsAdminOperations`;
+  - `TestClientKeyConnectionsGoLastInRotation`: el orden previo queda intacto y el alta, el import OAuth y el bulk import quedan últimos;
+  - `TestClientKeyCredentialCreationNeedsAdminOptIn`: con el ajuste ausente, el import y el bulk import con API key dan 403;
+  - integración `TestConnectionLifecycle/delete_removes_it`: DELETE con API key da 403 y con el operador da 200.
+- Comandos corridos:
+  - `go build ./...`, `go vet ./...` y `go vet -tags=integration`: OK;
+  - `go test -count=1 ./...`: todo ok;
+  - `-race` en handlers, auth, db y middleware: OK;
+  - `go test -tags=integration -race`: OK;
+  - Termux android/arm64: OK (ELF, e_machine 0xb7 = aarch64);
+  - `bash -n`: OK;
+  - `shellcheck` 0.11.0: solo SC2034 (`i` sin usar en `ensure_router_running`), que ya estaba en main.
+- Guard de Tailscale: `testing.Testing()` sigue activo y no se definió `CAPIMUX_TEST_FAKE_TAILSCALE`. Sin APIs pagas; no se tocó el teléfono ni el Workbuddy real.
+- CI de #158 con `d216bb75`, todo en verde: test 2m29s, Integration tests 43s, Docker verify 1m50s, multiagent 1m43s y Vercel.
+
 ## 8. Errores encontrados y corregidos
 
 - Escalada de privilegios API key → administrador del panel (hallazgo 1): corregido y verificado.
@@ -375,17 +416,19 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 - Updater: se construyó sobre #140 en lugar de duplicarlo. Su rama no se modificó.
 - Releases: `version.json` se publica como asset de la release y se genera con Go (sin dependencias nuevas). El manifest raw de `main` queda mapeado para binarios viejos.
 - Repo renombrado: los overrides con el nombre viejo se mapean, en lugar de romperlos.
+- Ciclo 7: el script de Workbuddy deriva el token CLI localmente en vez de guardar una copia, así no queda otro secreto en disco. Las altas por API key reciben una prioridad explícita (última) para no depender del desempate por `updatedAt` entre filas NULL.
 - Guardia Tailscale: el test falla con un panic en vez de saltearse en silencio. Si una regresión intenta tocar el host, se ve.
 
 ## 12. Riesgos y asuntos pendientes
 
 - #157 (ciclo 5) no depende de nada: se puede mergear en cualquier momento, con merge commit.
 - #158 (ciclo 6) no depende de nada; con #148 hay un conflicto trivial en `authPostureSettingKeys` (conservar ambas líneas).
-- **Decisión del dueño (ciclo 6):**
-  - ¿El default de `allowClientCredentialImport` pasa a cerrado? Antes hay que migrar el bootstrap de Workbuddy a un camino admin, por ejemplo `x-9r-cli-token` en el mismo host.
-  - Con `true`, ¿forzamos que las conexiones creadas por API key queden últimas en la rotación?
+- Decisión del dueño de ciclo 6, resuelta en el ciclo 7: default cerrado, Workbuddy migrado al token admin y altas por API key siempre al final.
+- #158 tras el ciclo 7: con #148 sigue habiendo un solo conflicto, en `admin_guard.go` (`authPostureSettingKeys`; conservar ambas líneas). Se verificó con `git merge-tree`.
+- Las copias viejas del script de Workbuddy (Bearer) reciben 403 hasta que se actualice el script o un admin active el opt-in.
+- Falta probar en el Termux real del dueño el script migrado. No se tocó el teléfono.
 - Orden de merge (ciclo 4): ya se mergearon #145, #146, #147, #151 y #154. Faltan, independientes, #148 y #149, y la cadena #140 → #150 → #152 → #153 → #155 (cambiando la base de #155 a `main`), siempre con merge commit.
-- Importación de credenciales con API key: acotada en #158 (ciclo 6). Sigue pendiente la decisión sobre el default.
+- Importación de credenciales con API key: cerrada por defecto en #158 (ciclo 7).
 - Updater:
   - No hay auto-update hasta que el dueño publique el primer tag `v*` con el `release.yml` de #153. Mientras tanto, el updater responde «al día».
   - Un hash no garantiza autenticidad: quien controle el manifest controla el hash. El manifest firmado de #140 es el paso siguiente.
@@ -410,7 +453,9 @@ Ciclo 5: #157 corrige el fallback de cuentas en cooldown, los reintentos repetid
 
 Ciclo 6: #158 impide que una API key de cliente sobrescriba credenciales, y las altas quedan bajo el opt-in `allowClientCredentialImport`. Workbuddy sigue funcionando. CI en verde, sin mergear.
 
+Ciclo 7: dentro de #158, Workbuddy importa con el token admin local, la API key ya no borra, reordena, cambia prioridades ni toca provider nodes, sus altas van al final y la importación con API key queda cerrada por defecto. CI en verde, sin mergear.
+
 Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 y #158 pueden ir en cualquier momento). Después:
-- decidir el default de `allowClientCredentialImport` y migrar Workbuddy (#158);
+- probar el script de Workbuddy migrado en Termux (#158);
 - firma del manifest;
 - seguir auditando el fallback, el catálogo y el recomendador.
