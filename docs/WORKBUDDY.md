@@ -37,6 +37,14 @@ The script installs missing dependencies, installs the official CodeBuddy CLI, o
 
 The default local router URL is `http://127.0.0.1:20128`. The bootstrap first tries `NINEROUTER_API_KEY`; if it is unset, it uses `~/.config/9router-go/admin-token` when present.
 
+The import call is `POST /api/oauth/codebuddy-intl/import` with `Authorization: Bearer <token>`, which the router treats as a client API key. With login enforced, client-key credential writes follow the admin-only setting `allowClientCredentialImport`:
+
+- not set (default, compatibility): append-only imports such as this one keep working; they always add a new connection and cannot overwrite one or choose its destination.
+- `false`: the import answers HTTP 403. Run the bootstrap from the dashboard host with an admin session, or set it to `true`.
+- `true`: client keys may also create connections through `POST /api/connections`, still without `baseUrl`/endpoint/proxy fields.
+
+A client key can never overwrite an existing credential, whatever the value (account-matching OAuth flows, `allowOverwrite`, or editing `apiKey`/tokens of a connection answer HTTP 403).
+
 ## Free/session route (`workbuddy-session`)
 
 The Free validation account could not create an API key: the CodeBuddy profile UI marked API Keys as a Pro-only feature. The same account could, however, log in through the official CodeBuddy CLI using `International Site` and use its Free/bonus credits. The CLI persists that authenticated session under its own account state, and 9router can invoke it without extracting or copying the credential.
