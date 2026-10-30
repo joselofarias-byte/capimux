@@ -64,6 +64,15 @@ func (a *ModelsDevAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 	if err := json.Unmarshal(body, &rawData); err != nil {
 		return nil, fmt.Errorf("decode catalog json: %w", err)
 	}
+	// null, {} or providers without models: an error, not an empty
+	// discovery, so the incident is logged and nothing is replaced.
+	total := 0
+	for _, p := range rawData {
+		total += len(p.Models)
+	}
+	if total == 0 {
+		return nil, fmt.Errorf("models.dev catalog response has no models (%d bytes); keeping the previous catalog", len(body))
+	}
 
 	var candidates []Candidate
 	// Several upstream ids collapse to one base id (a gateway's ":free" lane

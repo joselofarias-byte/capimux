@@ -122,18 +122,19 @@ func TestSetupServerRouter_InferenceKeyCannotRedirectCredentials(t *testing.T) {
 		}
 	})
 
-	// Compatibility: ordinary edits with the key keep working, including a
-	// full-form save that re-sends the unchanged destination.
+	// Since cycle 9 (owner decision 5) no edit of a connection or proxy pool
+	// is open to a client key, not even a rename, a toggle or a full-form save
+	// that re-sends the unchanged destination
+	// (client_key_connection_config_test.go).
 	for _, tc := range []struct{ name, method, path, body string }{
-		{"rename + toggle", http.MethodPut, "/api/connections/conn-1", `{"name":"renamed","isActive":true,"priority":2}`},
+		{"rename + toggle", http.MethodPut, "/api/connections/conn-1", `{"name":"renamed","isActive":true,"priority":1}`},
 		{"same baseUrl resent", http.MethodPut, "/api/connections/conn-1", `{"providerSpecificData":{"baseUrl":"https://api.owner.example/v1"}}`},
 		{"assigned model", http.MethodPut, "/api/connections/conn-1", `{"assignedModel":"gpt-x"}`},
-		{"node rename", http.MethodPut, "/api/provider-nodes/node-1", `{"name":"Renamed node","prefix":"own","apiType":"chat","baseUrl":"https://node.owner.example/v1"}`},
 		{"pool rename", http.MethodPut, "/api/proxy-pools/pool-1", `{"name":"renamed pool","urls":["http://proxy.owner.example:8080"],"type":"http"}`},
 	} {
-		t.Run("allowed "+tc.name, func(t *testing.T) {
-			if rec := do(tc.method, tc.path, tc.body, engineKey); rec.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Run("admin-only "+tc.name, func(t *testing.T) {
+			if rec := do(tc.method, tc.path, tc.body, engineKey); rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 			}
 		})
 	}
