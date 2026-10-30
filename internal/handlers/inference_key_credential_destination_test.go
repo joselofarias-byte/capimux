@@ -123,12 +123,12 @@ func TestSetupServerRouter_InferenceKeyCannotRedirectCredentials(t *testing.T) {
 	})
 
 	// Compatibility: ordinary edits with the key keep working, including a
-	// full-form save that re-sends the unchanged destination.
+	// full-form save that re-sends the unchanged destination. Priority changes
+	// and any provider node edit are admin-only (client_key_admin_ops_test.go).
 	for _, tc := range []struct{ name, method, path, body string }{
-		{"rename + toggle", http.MethodPut, "/api/connections/conn-1", `{"name":"renamed","isActive":true,"priority":2}`},
+		{"rename + toggle", http.MethodPut, "/api/connections/conn-1", `{"name":"renamed","isActive":true,"priority":1}`},
 		{"same baseUrl resent", http.MethodPut, "/api/connections/conn-1", `{"providerSpecificData":{"baseUrl":"https://api.owner.example/v1"}}`},
 		{"assigned model", http.MethodPut, "/api/connections/conn-1", `{"assignedModel":"gpt-x"}`},
-		{"node rename", http.MethodPut, "/api/provider-nodes/node-1", `{"name":"Renamed node","prefix":"own","apiType":"chat","baseUrl":"https://node.owner.example/v1"}`},
 		{"pool rename", http.MethodPut, "/api/proxy-pools/pool-1", `{"name":"renamed pool","urls":["http://proxy.owner.example:8080"],"type":"http"}`},
 	} {
 		t.Run("allowed "+tc.name, func(t *testing.T) {

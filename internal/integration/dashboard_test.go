@@ -125,7 +125,11 @@ func TestConnectionLifecycle(t *testing.T) {
 	})
 
 	t.Run("delete removes it", func(t *testing.T) {
-		res := env.Delete(t, "/api/connections/"+id)
+		if res := env.Delete(t, "/api/connections/"+id); res.Status != http.StatusForbidden {
+			t.Fatalf("API key DELETE /api/connections/%s = %d, want 403 (body: %s)", id, res.Status, truncate(res.Body))
+		}
+		requireConnection(t, listConnections(t, env), id)
+		res := env.Delete(t, "/api/connections/"+id, operator(t)...)
 		if res.Status != http.StatusOK {
 			t.Fatalf("DELETE /api/connections/%s = %d, want 200 (body: %s)", id, res.Status, truncate(res.Body))
 		}

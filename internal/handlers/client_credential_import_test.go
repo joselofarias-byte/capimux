@@ -148,7 +148,7 @@ func TestClientKeyCannotOverwriteCredentials(t *testing.T) {
 				t.Errorf("codex start-proxy: expected 403 for a client key, got %d: %s", rec.Code, rec.Body.String())
 			}
 			// Ordinary edits with the key keep working.
-			if rec := c.do(http.MethodPut, "/api/connections/conn-owner", `{"name":"renamed","priority":2,"data":{"apiKey":"owner-upstream-key"}}`, engineKeyAuth); rec.Code != http.StatusOK {
+			if rec := c.do(http.MethodPut, "/api/connections/conn-owner", `{"name":"renamed","priority":1,"data":{"apiKey":"owner-upstream-key"}}`, engineKeyAuth); rec.Code != http.StatusOK {
 				t.Errorf("rename with unchanged key: %d %s", rec.Code, rec.Body.String())
 			}
 		})

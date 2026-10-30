@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 
 	"9router/proxy/internal/db"
@@ -45,4 +46,19 @@ func ClientCredentialImport(repo *db.Repo) (enabled bool, set bool) {
 	}
 	b, _ := v.(bool)
 	return b, true
+}
+
+type clientKeyWriteKey struct{}
+
+// WithClientKeyWrite marks a credential write that a client API key was
+// allowed to make. Handlers that insert connections put such rows at the end
+// of the provider's rotation (see db.Repo.LastConnectionPriority).
+func WithClientKeyWrite(ctx context.Context) context.Context {
+	return context.WithValue(ctx, clientKeyWriteKey{}, true)
+}
+
+// IsClientKeyWrite reports whether WithClientKeyWrite marked ctx.
+func IsClientKeyWrite(ctx context.Context) bool {
+	v, _ := ctx.Value(clientKeyWriteKey{}).(bool)
+	return v
 }

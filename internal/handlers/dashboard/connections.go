@@ -431,6 +431,14 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 			writePlainError(w, http.StatusForbidden, adminRequiredMessage("fijar el destino de una conexión ("+key+")"))
 			return
 		}
+		// Only the admin orders the rotation: whatever priority was asked
+		// for, the new row goes after every existing one.
+		last, err := h.Repo.LastConnectionPriority(req.Provider)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		req.Priority = &last
 	}
 
 	// A create that reuses a name that is already in use used to replace the
@@ -679,6 +687,10 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 	}
 
 	if h.requiresAdminForPosture(r) {
+		if !sameIntPtr(existing.Priority, priority) {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar la prioridad o el orden de rotación"))
+			return
+		}
 		if key, changed := changedConnectionDestination(existing.Data, dataStr); changed {
 			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar el destino de una conexión ("+key+")"))
 			return
@@ -1194,4 +1206,11 @@ func mergeClineFreeTier(catalogue, free []any) []any {
 		}
 	}
 	return catalogue
+}
+
+func sameIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

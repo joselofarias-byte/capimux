@@ -38,7 +38,7 @@ func guardCredentialWrite(repo *db.Repo, kind credentialWriteKind, next http.Han
 		switch kind {
 		case credentialAppendOnly:
 			if enabled, set := auth.ClientCredentialImport(repo); enabled || !set {
-				next(w, r)
+				next(w, r.WithContext(auth.WithClientKeyWrite(r.Context())))
 				return
 			}
 			handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{
@@ -50,5 +50,18 @@ func guardCredentialWrite(repo *db.Repo, kind credentialWriteKind, next http.Han
 				"error": clientCredentialMessage("guardar credenciales por este flujo (puede sobrescribir una cuenta existente)"),
 			})
 		}
+	}
+}
+
+// adminOnly rejects requests authenticated only by a client API key. It guards
+// operations that change how the router works even without touching a
+// credential: deleting connections, the rotation order, provider nodes.
+func adminOnly(repo *db.Repo, what string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if repo != nil && auth.ClientKeyOnly(r, repo) {
+			handlerutil.WriteJSON(w, http.StatusForbidden, map[string]any{"error": clientCredentialMessage(what)})
+			return
+		}
+		next(w, r)
 	}
 }
