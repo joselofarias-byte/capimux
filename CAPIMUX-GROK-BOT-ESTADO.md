@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 10:20 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 12:45 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -29,6 +29,8 @@ Ciclo 5 (instrucciones del dueño, 2026-10-30 06:06 UTC-3): auditar el fallback 
 Ciclo 6 (instrucciones del dueño, 2026-10-30 09:07 UTC-3): limitar la importación y sobrescritura de credenciales de proveedores con API key de cliente, en la línea de #148, sin romper Workbuddy. Rama nueva desde `origin/main` (`47d6e0ce`), independiente de la cadena del updater. Ver «Credenciales con API key (ciclo 6)» en la sección 6.
 
 Ciclo 7 (decisión del dueño sobre #158, 2026-10-30 10:01 UTC-3): las API keys de cliente operan con privilegios mínimos y el token administrativo controla credenciales, conexiones, provider nodes y prioridades. Pasos: migrar Workbuddy al token admin, restringir la API key, forzar que sus altas queden últimas en la rotación y activar el default cerrado. Todo dentro de #158 (misma rama, commits nuevos, sin force-push). Ver «Privilegios mínimos de API key (ciclo 7)» en la sección 6.
+
+Ciclo 8 (2026-10-30 12:12 UTC-3): auditoría del recomendador de combos y del descubrimiento/actualización del catálogo free, desde origin/main `47d6e0ce`, sin repetir lo de #157. Dos defectos verificados, cada uno en su PR independiente: #159 y #160. Ver «Auditoría (ciclo 8)» en la sección 6.
 
 ## 2. Estado inicial
 
@@ -290,6 +292,25 @@ Mismo PR **#158**, commits nuevos `78ad5194`, `8270eb76` y `d216bb75`, sin merge
 - Sigue permitido con API key: renombrar, activar o desactivar y asignar modelo. No estaba en la lista del dueño; no se amplió el alcance.
 
 
+### Auditoría (ciclo 8)
+
+Dos PR nuevos hacia `main`, ramas nuevas desde origin/main `47d6e0ce`, sin mergear.
+
+- **#159** `fix/combos-sin-deshabilitados-ni-inactivos-20261030` (`5e3931d5`, `3b8b070e`): https://github.com/joselofarias-byte/capimux/pull/159
+  - `dashboard/combos_family.go` (`usableModelFamilies`, `POST /api/combos/auto-family`): los modelos custom se sumaban a su familia sin filtro. Un custom deshabilitado, o de un proveedor sin conexión o con su única conexión desactivada, entraba en la cadena de fallback del combo. Ahora exige alias con conexión activa y que no esté deshabilitado, igual que `/v1/models`.
+  - `dashboard/combos.go` (`freeTierComboModels`, `POST /api/combos/auto-free`): usaba `GetConnectedProviders`, que cuenta conexiones desactivadas, e ignoraba los deshabilitados. Con solo una conexión inactiva devolvía 200 y armaba un combo inutilizable. Ahora usa solo conexiones activas y omite los deshabilitados.
+- **#160** `fix/descubrimiento-free-variantes-modelsdev-20261030` (`74dfdfcc`): https://github.com/joselofarias-byte/capimux/pull/160
+  - `controlplane/discovery/modelsdev.go`: varias entradas se reducen al mismo id base (`poolside/laguna-s-2.1:free` y `poolside/laguna-s-2.1`). Se emitían todas y ganaba la última según el orden aleatorio de mapas de Go, así que los modelos free de OpenRouter entraban y salían del pool free en cada sync.
+  - Con el JSON público real de models.dev servido por httptest: en main, 489 candidatas duplicadas y 12, 9, 10 y 12 de 17 modelos free de OpenRouter como free en 4 syncs. Con el arreglo: 0 duplicadas y 17/17 estable.
+  - Arreglo: una candidata por proveedor + base; gana la variante free explícita y, si no, el upstream menor.
+- Revisado sin hallazgos:
+  - filtros y orden de `suggestedmodels.go` (determinista para la misma entrada);
+  - shuffle + sort estable del routing (intencional);
+  - `builtin_free` sin duplicados;
+  - guard `running` y mutexes de `SyncModelCatalog`;
+  - `shouldReplacePricing` y `ownedByAdapter` del orquestador.
+- Documentado, no corregido (ver sección 12): colisiones de `catalog_sync.go`, cuerpo 200 vacío, claves faltantes en Cline/unorouter, combos de familia que quedan viejos, orden alfabético de miembros.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
@@ -367,6 +388,16 @@ Ciclo 7 (#158, corrido localmente el 2026-10-30):
 - Guard de Tailscale: `testing.Testing()` sigue activo y no se definió `CAPIMUX_TEST_FAKE_TAILSCALE`. Sin APIs pagas; no se tocó el teléfono ni el Workbuddy real.
 - CI de #158 con `d216bb75`, todo en verde: test 2m29s, Integration tests 43s, Docker verify 1m50s, multiagent 1m43s y Vercel.
 
+Ciclo 8 (#159 y #160, corrido localmente el 2026-10-30):
+- Tests nuevos, verificados fallando en main:
+  - #159: `TestAutoFamilySkipsDisabledAndUnconnectedCustomModels`, `TestAutoFamilySkipsInactiveConnections` y `TestAutoFreeComboSkipsInactiveConnectionsAndDisabledModels`; regresión `TestAutoFamilyCustomModelFollowsConnectionAlias` (pasa en main y con el arreglo);
+  - #160: `TestModelsDevAdapter_CollapsedVariantsAreDeterministic` (main: `openrouter/inkling emitted twice`) y `TestOrchestrator_ModelsDevFreeLaneStableAcrossSyncs` (main: `round 1: free lane flipped`). Solo httptest, sin red.
+- En cada rama: `go build ./...`, `go vet ./...`, `go vet -tags=integration`, `go test -count=1 ./...`, `-race` (dashboard y db en #159; `internal/controlplane/...` en #160), `go test -tags=integration -race` y build Termux android/arm64 (ELF, e_machine 0xb7): todo OK.
+- Guard de Tailscale: `testing.Testing()` en `tunnel.go` (líneas 54 y 64) y sin `CAPIMUX_TEST_FAKE_TAILSCALE`. Sin APIs pagas; no se tocó el teléfono.
+- CI:
+  - #159: todo en verde a la primera (test 1m49s, Integration 41s, Docker verify 1m27s, Vercel).
+  - #160: el primer intento falló en `TestHandleGetConnectionUsage_SpacesAntigravityBurst` (dashboard, test de tiempos: 35 ms entre lecturas, esperaba ≥ 40 ms). El PR no toca ese paquete. Se re-corrió el job y quedó todo en verde (test 2m11s, Integration 41s, Docker verify 1m42s, Vercel).
+
 ## 8. Errores encontrados y corregidos
 
 - Escalada de privilegios API key → administrador del panel (hallazgo 1): corregido y verificado.
@@ -441,6 +472,16 @@ Funciones nuevas: ajuste opt-in `allowClientKeyManagement` (#148), `sha256s` por
 - Ciclo 5 (#157): `gemini-2.0-flash` sigue clasificado solo como STT, igual que en el registro upstream. Si se quiere ofrecer como chat, es una decisión de catálogo.
 - `fallback.go` tiene una línea en blanco doble preexistente que `gofmt` marca. No se tocó, para mantener el diff mínimo.
 
+- Ciclo 8, decisiones y riesgos (documentados, sin cambios):
+  - `providers/catalog_sync.go` indexa límites y modalidades por id base y se queda con la primera variante según el orden del mapa. Con el catálogo real hay 137 colisiones con límites o modalidades distintos (p. ej. 32768 contra 131072 de contexto). Elegir qué variante vale es una decisión de catálogo.
+  - Si models.dev responde 200 con `null` o `{}`, el catálogo en memoria se reemplaza y la caché en disco se sobrescribe vacía.
+  - Los adaptadores Cline y unorouter toman un 200 sin la clave `free`/`data` como catálogo vacío autoritativo y desactivan todos sus modelos. No se observó en la práctica.
+  - El recomendador por familia no borra combos de familias que quedaron con menos de 2 miembros o que desaparecieron. Borrarlos es una decisión del dueño.
+  - Orden de miembros alfabético: versiones viejas primero y «4.10» antes que «4.9». Es una decisión de diseño.
+  - `GetConnectedProviders` quedó sin uso tras #159; no se borró.
+  - `TestHandleGetConnectionUsage_SpacesAntigravityBurst` es sensible a tiempos en CI (igual que el flaky conocido de fetchgate).
+  - El loop de orcarouter hace `defer resp.Body.Close()` dentro del loop (menor).
+
 ## 13. Participación de otros modelos
 
 Ninguna. Todo el análisis, la implementación y la verificación de este ciclo los hizo Grok Bot localmente; no se consultó ni se atribuye trabajo a otros modelos.
@@ -454,6 +495,8 @@ Ciclo 5: #157 corrige el fallback de cuentas en cooldown, los reintentos repetid
 Ciclo 6: #158 impide que una API key de cliente sobrescriba credenciales, y las altas quedan bajo el opt-in `allowClientCredentialImport`. Workbuddy sigue funcionando. CI en verde, sin mergear.
 
 Ciclo 7: dentro de #158, Workbuddy importa con el token admin local, la API key ya no borra, reordena, cambia prioridades ni toca provider nodes, sus altas van al final y la importación con API key queda cerrada por defecto. CI en verde, sin mergear.
+
+Ciclo 8: #159 (el recomendador de combos ya no sugiere modelos deshabilitados ni de proveedores sin conexión activa) y #160 (el descubrimiento de models.dev conserva de forma estable los carriles `:free`). Independientes entre sí y de los demás, CI en verde, sin mergear.
 
 Siguiente prioridad: que el dueño revise y mergee en el orden indicado (#157 y #158 pueden ir en cualquier momento). Después:
 - probar el script de Workbuddy migrado en Termux (#158);
