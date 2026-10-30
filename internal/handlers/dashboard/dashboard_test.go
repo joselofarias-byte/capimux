@@ -397,6 +397,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 	}
 	bodyBytes, _ := json.Marshal(createBody)
 	req = httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(bodyBytes))
+	asDashboardAdmin(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -416,6 +417,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 
 	// 3. PUT /api/keys/{id}/toggle (toggle status)
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/"+genID+"/toggle", nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -430,6 +432,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 
 	// 4. DELETE /api/keys/{id}
 	req = httptest.NewRequest(http.MethodDelete, "/api/keys/"+genID, nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -644,6 +647,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// 3. ApiKey errors
 	// Toggle non-existent
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/non-existent/toggle", nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -653,6 +657,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// Toggle with explicit isActive
 	// First create a key
 	req = httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader([]byte(`{"id":"key-toggle-test","key":"sk-toggle-test"}`)))
+	asDashboardAdmin(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -663,6 +668,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// Set explicit false
 	explicitFalse := []byte(`{"isActive":false}`)
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/key-toggle-test/toggle", bytes.NewReader(explicitFalse))
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
