@@ -1,7 +1,7 @@
 # Changelog
 
 ## [Unreleased]
-- Release: la imagen Docker se publica en `ghcr.io/joselofarias-byte/capimux` (antes `luqmenul/9router-go` en Docker Hub, el registro upstream) con el `GITHUB_TOKEN` del workflow (`packages: write`), después de que el job de binarios termine bien. El README ya apunta a esa imagen. La primera publicación la hace el workflow de release al empujar un tag `v*`; el paquete de GHCR nace privado y hacerlo público es decisión del dueño.
+- Release: la imagen Docker se publica en `ghcr.io/joselofarias-byte/capimux` (antes `luqmenul/9router-go` en Docker Hub, el registro upstream) con el `GITHUB_TOKEN` del workflow (`packages: write`), después de que el job de binarios termine bien. El README ya apunta a esa imagen. La primera publicación la hace el workflow de release al empujar un tag `v*`; según la documentación de GitHub el paquete puede quedar privado en la primera publicación; si es así, hacerlo público (Package settings → Change visibility, irreversible) es decisión del dueño.
 
 - Seguridad (GROK-004 / OPS-01): el updater valida un manifest firmado con Ed25519 (`version.signed.json`, stdlib) contra claves públicas embebidas en el binario (`embeddedManifestPublicKeys`). Con una clave embebida, `CheckUpdate` usa solo ese manifest: firma ausente, alterada o de otra clave, payload alterado, manifest vencido, downgrade/replay o clave embebida malformada se rechazan sin volver a `version.json` ni a GitHub Releases. Sin clave embebida (estado actual) todo sigue igual, con SHA-256 obligatorio. El dueño genera la clave y firma fuera del repo; procedimiento en `docs/security/GROK-004-OPS-01.md`.
 
