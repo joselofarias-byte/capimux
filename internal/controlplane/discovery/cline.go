@@ -68,17 +68,33 @@ func (a *ClineFreeAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 		return nil, fmt.Errorf("read Cline catalog body: %w", err)
 	}
 
+	// A pointer tells a missing or null "free" key (a broken or changed
+	// response: error, so the previous classification stays) from an explicit
+	// empty list (Cline really has no free models: authoritative).
 	var payload struct {
-		Free []clineCatalogModel `json:"free"`
+		Free *[]clineCatalogModel `json:"free"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("decode Cline catalog json: %w", err)
 	}
+	if payload.Free == nil {
+		return nil, fmt.Errorf("Cline catalog response has no \"free\" list (%d bytes); keeping the previous classification", len(body))
+	}
+	free := *payload.Free
+	withID := 0
+	for _, m := range free {
+		if m.ID != "" {
+			withID++
+		}
+	}
+	if len(free) > 0 && withID == 0 {
+		return nil, fmt.Errorf("Cline catalog lists %d free models without ids; keeping the previous classification", len(free))
+	}
 
 	now := time.Now().UTC()
-	candidates := make([]Candidate, 0, len(payload.Free))
-	seen := make(map[string]struct{}, len(payload.Free))
-	for _, model := range payload.Free {
+	candidates := make([]Candidate, 0, len(free))
+	seen := make(map[string]struct{}, len(free))
+	for _, model := range free {
 		if model.ID == "" {
 			continue
 		}
