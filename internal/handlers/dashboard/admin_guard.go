@@ -6,6 +6,7 @@ import (
 	"reflect"
 
 	"9router/proxy/internal/auth"
+	"9router/proxy/internal/promptinject"
 )
 
 // authPostureSettingKeys are settings whose change can weaken how the
@@ -34,7 +35,16 @@ var authPostureSettingKeys = []string{
 	// Opt-in that lets client API keys add provider credentials; a key must
 	// not be able to grant itself that.
 	auth.ClientCredentialImportSetting,
+	// Prompt injection / combo identity / capture switches: sensitive
+	// configuration that only an admin turns on or off.
+	promptinject.SettingInjectionEnabled,
+	promptinject.SettingIdentityEnabled,
+	promptinject.SettingCaptureEnabled,
 }
+
+// strictAdminSettingKeys are refused to any request carrying a client API key
+// without an admin credential, even when the dashboard login is off.
+var strictAdminSettingKeys = promptinject.SettingKeys
 
 // isAdminRequest reports whether the caller holds an administrative credential:
 // a valid dashboard session cookie or the on-device CLI token. A client API key
