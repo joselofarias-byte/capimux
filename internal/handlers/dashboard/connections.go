@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/samber/lo"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -414,6 +415,32 @@ func (h *DashboardHandler) HandleCreateConnection(w http.ResponseWriter, r *http
 		dataStr = string(encoded)
 	}
 
+	// A client API key (login enforced, no session or CLI token) never replaces
+	// an existing credential, may create one only after an admin enabled
+	// allowClientCredentialImport, and never picks where a new one is sent.
+	if h.requiresAdminForPosture(r) {
+		if explicitID || req.AllowOverwrite || req.Overwrite {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("reemplazar una credencial de proveedor existente"))
+			return
+		}
+		if enabled, _ := auth.ClientCredentialImport(h.Repo); !enabled {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("crear credenciales de proveedor")+" Para permitirlo de forma explícita, un administrador puede activar el ajuste "+auth.ClientCredentialImportSetting+".")
+			return
+		}
+		if key, ok := connectionDestinationIn(dataStr); ok {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("fijar el destino de una conexión ("+key+")"))
+			return
+		}
+		// Only the admin orders the rotation: whatever priority was asked
+		// for, the new row goes after every existing one.
+		last, err := h.Repo.LastConnectionPriority(req.Provider)
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		req.Priority = &last
+	}
+
 	// A create that reuses a name that is already in use used to replace the
 	// stored key without a word: a script naming rows "Key 1", "Key 2", … kept
 	// the existing pool entries and handed back a success. A caller that means
@@ -656,6 +683,21 @@ func (h *DashboardHandler) HandleUpdateConnection(w http.ResponseWriter, r *http
 
 		if b, err := json.Marshal(dataMap); err == nil {
 			dataStr = string(b)
+		}
+	}
+
+	if h.requiresAdminForPosture(r) {
+		if !sameIntPtr(existing.Priority, priority) {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar la prioridad o el orden de rotación"))
+			return
+		}
+		if key, changed := changedConnectionDestination(existing.Data, dataStr); changed {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar el destino de una conexión ("+key+")"))
+			return
+		}
+		if key, changed := changedConnectionCredential(existing.Data, dataStr); changed {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("sobrescribir la credencial de una conexión ("+key+")"))
+			return
 		}
 	}
 
@@ -1164,4 +1206,11 @@ func mergeClineFreeTier(catalogue, free []any) []any {
 		}
 	}
 	return catalogue
+}
+
+func sameIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
