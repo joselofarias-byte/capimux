@@ -16,7 +16,8 @@ export const COMBO_STRATEGIES = [
   { value: 'round-robin', label: 'Round Robin — rotate' },
   { value: 'sticky', label: 'Sticky — stay until the limit' },
   { value: 'capacity', label: 'Capacity — prefer free tiers' },
-  { value: 'fusion', label: 'Fusion — panel + judge' }
+  { value: 'fusion', label: 'Fusion — panel + judge' },
+  { value: 'health', label: 'Salud — prioriza modelos sanos' }
 ] as const
 
 // The global "Combo Routing Mode" calls try-in-order `first-model`, while a
