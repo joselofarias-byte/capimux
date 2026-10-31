@@ -233,10 +233,11 @@ func TestHandleMessagesComboFallback_RetriesOnceOnBoundedRetryAfter(t *testing.T
 			// Upstream says "wait ~1s" (RFC3339). A 429 is only worth retrying
 			// inside brief429RetryTolerance — past that the account is out of
 			// quota and re-hitting it deepens the upstream's backoff — so the
-			// bound, not the old 8s cap, is what this covers.
-			ra := time.Now().Add(time.Second).Format(time.RFC3339)
+			// bound, not the old 8s cap, is what this covers. Rounded up
+			// (isoRetryAfterBody): a truncated RFC3339 second could already be
+			// in the past when parsed, leaving no wait and no retry.
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":{"retryAfter":"` + ra + `"}}`))
+			w.Write([]byte(isoRetryAfterBody(time.Second)))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
