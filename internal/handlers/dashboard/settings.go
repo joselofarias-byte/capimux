@@ -186,10 +186,22 @@ func (h *DashboardHandler) HandleExportDatabase(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	payload, err := h.exportDatabase()
+	sections, err := parseBackupSections(r.URL.Query().Get("sections"))
+	if err != nil {
+		writePlainError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	full, err := h.exportDatabase()
 	if err != nil {
 		writePlainError(w, http.StatusInternalServerError, "Failed to export database")
 		return
+	}
+	var payload any = full
+	if sections != nil {
+		if payload, err = filterBackupPayload(full, sections); err != nil {
+			writePlainError(w, http.StatusInternalServerError, "Failed to export database")
+			return
+		}
 	}
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -206,7 +218,11 @@ func (h *DashboardHandler) HandleExportDatabase(w http.ResponseWriter, r *http.R
 
 	nowStr := time.Now().Format("2006-01-02-150405")
 	w.Header().Set("Content-Type", backupContentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="9router-backup-%s.9rbak"`, nowStr))
+	kind := "backup"
+	if sections != nil {
+		kind = "backup-parcial"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="9router-%s-%s.9rbak"`, kind, nowStr))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
@@ -602,6 +618,12 @@ func (h *DashboardHandler) importDatabase(payload map[string]any) error {
 		return err
 	}
 
+	// A partial backup (payload "sections") clears and restores only its own
+	// sections; everything else stays as it is.
+	sections, err := partialImportSections(payload)
+	if err != nil {
+		return err
+	}
 	wipes := []string{
 		`DELETE FROM settings`,
 		`DELETE FROM providerConnections`,
@@ -610,6 +632,12 @@ func (h *DashboardHandler) importDatabase(payload map[string]any) error {
 		`DELETE FROM apiKeys`,
 		`DELETE FROM combos`,
 		`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`,
+	}
+	if sections != nil {
+		wipes = wipes[:0]
+		for _, s := range sections {
+			wipes = append(wipes, backupSections[s]...)
+		}
 	}
 	for _, stmt := range wipes {
 		if _, err := tx.Exec(stmt); err != nil {
