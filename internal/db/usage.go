@@ -2,7 +2,12 @@ package db
 
 import (
 	"fmt"
+	"os"
+	"strconv"
+	"sync/atomic"
 	"time"
+
+	"9router/proxy/internal/log"
 )
 
 // GetUsageDaily returns the daily usage JSON data for a given date key.
@@ -46,7 +51,52 @@ func (r *Repo) UpsertUsageDaily(dateKey string, data string) error {
 	return nil
 }
 
-// InsertRequestDetail logs a request detail record for the Recent Requests dashboard tab.
+var requestDetailsInsertCounter atomic.Uint64
+
+// requestDetailsReadPurgeInterval bounds how often a dashboard read deletes
+// expired rows. Reads always filter by the cutoff, so a skipped purge never
+// shows expired content; it only defers the DELETE.
+const requestDetailsReadPurgeInterval = 10 * time.Minute
+
+// requestDetailsLastReadPurge holds the UnixNano of the last read-time purge.
+var requestDetailsLastReadPurge atomic.Int64
+
+// requestDetailsRetentionDays bounds diagnostic data lifetime. Bad or unsafe
+// configuration values fail closed to a seven-day default.
+func requestDetailsRetentionDays() int {
+	days, err := strconv.Atoi(os.Getenv("CAPIMUX_REQUEST_DETAILS_RETENTION_DAYS"))
+	if err != nil || days < 1 || days > 365 {
+		return 7
+	}
+	return days
+}
+
+// requestDetailsCutoff is the oldest timestamp still inside retention.
+func requestDetailsCutoff(now time.Time) time.Time {
+	return now.UTC().AddDate(0, 0, -requestDetailsRetentionDays())
+}
+
+// PurgeRequestDetailsBefore deletes records older than the UTC cutoff.
+func (r *Repo) PurgeRequestDetailsBefore(cutoff time.Time) (int64, error) {
+	result, err := r.db.Exec(`DELETE FROM requestDetails WHERE timestamp < ?`, cutoff.UTC().Format("2006-01-02T15:04:05.000Z"))
+	if err != nil {
+		return 0, fmt.Errorf("purge expired request details: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// PurgeAllRequestDetails irreversibly removes all diagnostic records.
+// It does not remove aggregate usageHistory or usageDaily metrics.
+func (r *Repo) PurgeAllRequestDetails() (int64, error) {
+	result, err := r.db.Exec(`DELETE FROM requestDetails`)
+	if err != nil {
+		return 0, fmt.Errorf("purge request details: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// InsertRequestDetail persists usage diagnostics and periodically prunes old
+// records. Cleanup is sampled to avoid doing a DELETE on every LLM request.
 func (r *Repo) InsertRequestDetail(id, provider, model, connectionID, status string, data string) error {
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	_, err := r.db.Exec(
@@ -55,6 +105,13 @@ func (r *Repo) InsertRequestDetail(id, provider, model, connectionID, status str
 	)
 	if err != nil {
 		return fmt.Errorf("insert request detail %s: %w", id, err)
+	}
+	if requestDetailsInsertCounter.Add(1)%128 == 1 {
+		// The record is already stored: a failed cleanup must not report the
+		// insert as failed. The next sampled insert or read retries it.
+		if _, err := r.PurgeRequestDetailsBefore(requestDetailsCutoff(time.Now())); err != nil {
+			log.Warn("usage", "request details retention purge failed", "error", err)
+		}
 	}
 	return nil
 }
@@ -241,16 +298,26 @@ func (r *Repo) GetRecentRoutingRequestMetrics(limit int) ([]RoutingRequestMetric
 
 // GetRequestDetailsPaged returns paged raw json strings and total count from requestDetails.
 func (r *Repo) GetRequestDetailsPaged(limit, offset int) ([]string, int, error) {
+	now := time.Now()
+	cutoff := requestDetailsCutoff(now)
+	if last := requestDetailsLastReadPurge.Load(); now.UnixNano()-last >= int64(requestDetailsReadPurgeInterval) &&
+		requestDetailsLastReadPurge.CompareAndSwap(last, now.UnixNano()) {
+		if _, err := r.PurgeRequestDetailsBefore(cutoff); err != nil {
+			log.Warn("usage", "request details retention purge failed", "error", err)
+		}
+	}
+	cutoffKey := cutoff.UTC().Format("2006-01-02T15:04:05.000Z")
 	var total int
-	if err := r.db.QueryRow(`SELECT COUNT(*) FROM requestDetails`).Scan(&total); err != nil {
+	if err := r.db.QueryRow(`SELECT COUNT(*) FROM requestDetails WHERE timestamp >= ?`, cutoffKey).Scan(&total); err != nil {
 		total = 0
 	}
 
 	rows, err := r.db.Query(`
 		SELECT data FROM requestDetails
+		WHERE timestamp >= ?
 		ORDER BY timestamp DESC
 		LIMIT ? OFFSET ?
-	`, limit, offset)
+	`, cutoffKey, limit, offset)
 	if err != nil {
 		return nil, total, fmt.Errorf("query requestDetails paged: %w", err)
 	}
