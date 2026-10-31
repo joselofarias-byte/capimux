@@ -13,6 +13,7 @@ import (
 	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/multiagent"
+	"9router/proxy/internal/promptinject"
 	"9router/proxy/web"
 	json "encoding/json/v2"
 	"github.com/go-chi/chi/v5"
@@ -148,6 +149,8 @@ func SetupRoutes(r interface {
 func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
 	dashH := dashboard.NewDashboardHandler(repo)
 	ssoH := sso.NewHandler(repo)
+	// Prompt injection, combo identities, inspector and captures: admin only.
+	setupPromptInjectionRoutes(r, repo)
 	// Per-key quotas admin API: admin only.
 	setupKeyQuotaRoutes(r, repo)
 	// Health tracker behind the opt-in "health" combo strategy: admin only.
@@ -449,6 +452,17 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		r.Use(middleware.RequireApiKey(repo))
 		// Per-key RPM/TPM/concurrency/token quotas (off by default).
 		r.Use(keyquota.Middleware(repo, func(r *http.Request) string {
+			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
+				return k.ID
+			}
+			return ""
+		}))
+		// Prompt injection and combo public identity (both off by default).
+		// Runs after authentication so the layer of the calling key is known.
+		r.Use(promptinject.Middleware(repo, func(name string) bool {
+			c, err := repo.GetComboByName(name)
+			return err == nil && c != nil
+		}, func(r *http.Request) string {
 			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
 				return k.ID
 			}
