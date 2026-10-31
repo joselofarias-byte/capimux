@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"9router/proxy/internal/combohealth"
 	"context"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
@@ -506,6 +507,10 @@ func (h *ChatHandler) applyComboStrategy(strategy string, models []string, combo
 		}
 
 		return rotated
+	case "health":
+		// Healthiest members first; unhealthy ones are moved last, never
+		// dropped, so the combo keeps its full availability.
+		return combohealth.Default.Order(models, h.comboHealthKey)
 	case "capacity":
 		fallthrough
 	default:
