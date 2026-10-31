@@ -77,6 +77,28 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 		updates = map[string]any{}
 	}
 
+	// A client API key may pass the dashboard guard, but it must not be able to
+	// take over or weaken dashboard authentication (set the password, disable
+	// the login, switch to SSO, expose the dashboard through a tunnel).
+	if h.requiresAdminForPosture(r) {
+		if _, wantsPasswordChange := updates["newPassword"]; wantsPasswordChange {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar la contraseña del panel"))
+			return
+		}
+		current, err := h.Repo.GetSettingsRaw()
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if current == nil {
+			current = map[string]any{}
+		}
+		if key, changed := changedPostureKey(current, updates); changed {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("modificar el ajuste de seguridad "+key))
+			return
+		}
+	}
+
 	// Password change carries current/new instead of a direct `password` write.
 	if _, wantsPasswordChange := updates["newPassword"]; wantsPasswordChange {
 		newPassword, _ := updates["newPassword"].(string)

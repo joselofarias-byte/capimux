@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  REGISTRY_IMAGE: luqmenul/9router-go
+  REGISTRY_IMAGE: ghcr.io/joselofarias-byte/capimux
 
 jobs:
   binaries:
@@ -39,6 +39,23 @@ jobs:
 
       - name: Build all platforms
         run: make cross
+
+      # The self-updater refuses any binary without a valid SHA-256, so every
+      # release publishes version.json with one download URL and one hash per
+      # platform. It is cross-checked against SHA256SUMS.txt, and the job
+      # fails rather than publishing a release the updater would refuse.
+      - name: Generate update manifest (per-platform SHA-256)
+        run: |
+          sha256sum -c SHA256SUMS.txt
+          go run ./cmd/release-manifest \
+            -version "${GITHUB_REF_NAME}" \
+            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            -sums SHA256SUMS.txt \
+            -out version.json \
+            9router-go-linux-amd64 9router-go-linux-arm64 \
+            9router-go-darwin-amd64 9router-go-darwin-arm64 \
+            9router-go-windows-amd64.exe 9router-go-android-arm64
+          cat version.json
 
       - name: Generate changelog
         id: changelog
@@ -71,7 +88,9 @@ jobs:
             9router-go-darwin-amd64
             9router-go-darwin-arm64
             9router-go-windows-amd64.exe
+            9router-go-android-arm64
             SHA256SUMS.txt
+            version.json
           body_path: /tmp/changelog.md
           generate_release_notes: false
         env:
@@ -79,6 +98,7 @@ jobs:
 
   docker:
     name: Build and push Docker image
+    needs: binaries
     runs-on: ubuntu-latest
     environment: prod
     steps:
@@ -90,11 +110,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta

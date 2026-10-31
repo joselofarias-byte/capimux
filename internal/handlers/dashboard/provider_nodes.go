@@ -232,6 +232,16 @@ func (h *DashboardHandler) HandleUpdateProviderNode(w http.ResponseWriter, r *ht
 		baseURL = strings.TrimSuffix(baseURL, "/")
 		baseURL = strings.TrimSuffix(baseURL, "/embeddings")
 	}
+	if h.requiresAdminForPosture(r) {
+		previousBaseURL := ""
+		if nodeData != nil {
+			previousBaseURL = nodeData.BaseURL
+		}
+		if baseURL != previousBaseURL {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar la URL base de un nodo de proveedor"))
+			return
+		}
+	}
 	apiType := ""
 	if nodeData != nil {
 		apiType = nodeData.APIType
