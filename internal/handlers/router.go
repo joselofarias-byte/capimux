@@ -10,6 +10,7 @@ import (
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlers/sso"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/multiagent"
 	"9router/proxy/internal/promptinject"
@@ -150,6 +151,10 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	ssoH := sso.NewHandler(repo)
 	// Prompt injection, combo identities, inspector and captures: admin only.
 	setupPromptInjectionRoutes(r, repo)
+	// Per-key quotas admin API: admin only.
+	setupKeyQuotaRoutes(r, repo)
+	// Health tracker behind the opt-in "health" combo strategy: admin only.
+	setupComboHealthRoutes(r, repo)
 
 	// Multiagent calls share the dashboard authentication guard.
 	r.Get("/api/multiagent/policy", multiagent.PolicyHandler)
@@ -445,6 +450,13 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// API-key protected domain routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireApiKey(repo))
+		// Per-key RPM/TPM/concurrency/token quotas (off by default).
+		r.Use(keyquota.Middleware(repo, func(r *http.Request) string {
+			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
+				return k.ID
+			}
+			return ""
+		}))
 		// Prompt injection and combo public identity (both off by default).
 		// Runs after authentication so the layer of the calling key is known.
 		r.Use(promptinject.Middleware(repo, func(name string) bool {

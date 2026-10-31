@@ -1,6 +1,7 @@
 package media
 
 import (
+	"9router/proxy/internal/retrypolicy"
 	"bytes"
 	json "encoding/json/v2"
 	"fmt"
@@ -68,7 +69,10 @@ func (h *MediaHandler) handleAntigravityImage(w http.ResponseWriter, r *http.Req
 		} else {
 			lastErr = attemptErr
 		}
-		if usePinned {
+		// Non-idempotent: never generate again on another account after an
+		// ambiguous failure (5xx, cut or timeout after sending, unreadable
+		// or unparseable success).
+		if usePinned || retrypolicy.IsStop(lastErr) {
 			return lastErr
 		}
 		excludeIDs = append(excludeIDs, conn.ID)
@@ -170,13 +174,17 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 	client := h.ChatH.GetClientForConnection(connData)
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("antigravity request failed: %w", err)
+		err = fmt.Errorf("antigravity request failed: %w", err)
+		if !retrypolicy.MayRotate(true, 0, err) {
+			return retrypolicy.Stop(err)
+		}
+		return err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read antigravity response: %w", err)
+		return retrypolicy.Stop(fmt.Errorf("read antigravity response: %w", err))
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -199,12 +207,17 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 				}
 			}
 		}
-		return fmt.Errorf("antigravity image failed with status %d: %s", resp.StatusCode, string(respBody[:min(300, len(respBody))]))
+		failErr := fmt.Errorf("antigravity image failed with status %d: %s", resp.StatusCode, string(respBody[:min(300, len(respBody))]))
+		if !retrypolicy.MayRotate(true, resp.StatusCode, nil) {
+			return retrypolicy.Stop(failErr)
+		}
+		return failErr
 	}
 
 	formatted, err := translator.FormatAntigravityImageResponse(respBody, prompt)
 	if err != nil {
-		return fmt.Errorf("format image response: %w", err)
+		// The upstream already generated the image: do not regenerate.
+		return retrypolicy.Stop(fmt.Errorf("format image response: %w", err))
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -6,6 +6,7 @@ export type ActiveTab =
   | 'multiagent'
   | 'analytics'
   | 'quota'
+  | 'key-quotas'
   | 'token-saver'
   | 'cli-tools'
   | 'media-embedding'
@@ -32,6 +33,7 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   multiagent: '/dashboard/multiagent',
   analytics: '/dashboard/usage',
   quota: '/dashboard/quota',
+  'key-quotas': '/dashboard/key-limits',
   'token-saver': '/dashboard/token-saver',
   'cli-tools': '/dashboard/cli-tools',
   'media-embedding': '/dashboard/media-providers/embedding',
@@ -83,6 +85,9 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
   '/dashboard/analytics': 'analytics',
   '/usage': 'analytics',
   '/analytics': 'analytics',
+
+  // per-key quotas
+  '/dashboard/key-limits': 'key-quotas',
 
   // quota tracker
   '/dashboard/quota': 'quota',
