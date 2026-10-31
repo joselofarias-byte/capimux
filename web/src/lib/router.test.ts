@@ -32,6 +32,8 @@ describe('router', () => {
     expect(TAB_ROUTES.combos).toBe('/dashboard/combos')
     expect(TAB_ROUTES.analytics).toBe('/dashboard/usage')
     expect(TAB_ROUTES.quota).toBe('/dashboard/quota')
+    expect(TAB_ROUTES['key-quotas']).toBe('/dashboard/key-limits')
+    expect(pathToTab('/dashboard/key-limits')).toBe('key-quotas')
     expect(TAB_ROUTES['token-saver']).toBe('/dashboard/token-saver')
     expect(TAB_ROUTES['cli-tools']).toBe('/dashboard/cli-tools')
     expect(TAB_ROUTES['media-embedding']).toBe('/dashboard/media-providers/embedding')

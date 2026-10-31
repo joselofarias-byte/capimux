@@ -18,6 +18,7 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy/executor"
@@ -586,6 +587,9 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			Endpoint:     endpoint,
 		}
 		h.logUsage(logInfo, usage, latencyMs, body, metrics)
+		// Per-key token quotas (no-op unless enabled): logUsage has already
+		// filled in estimated tokens when the upstream reported none.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
 		fwdErr = nil
 		return nil
 	}
@@ -610,6 +614,10 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		body,
 		metrics,
 	)
+	if usage != nil {
+		// Tokens a failed or aborted stream already consumed still count.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
+	}
 	if isClientCanceled(ctx, fwdErr) {
 		log.Info("fallback", "client canceled request", "provider", provider, "model", model, "conn", connectionID)
 	} else if projectProbeCached(connectionID) {
