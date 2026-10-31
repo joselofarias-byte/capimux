@@ -150,6 +150,8 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	ssoH := sso.NewHandler(repo)
 	// Per-key quotas admin API: admin only.
 	setupKeyQuotaRoutes(r, repo)
+	// Health tracker behind the opt-in "health" combo strategy: admin only.
+	setupComboHealthRoutes(r, repo)
 
 	// Multiagent calls share the dashboard authentication guard.
 	r.Get("/api/multiagent/policy", multiagent.PolicyHandler)
