@@ -36,8 +36,10 @@ func TestDashboardRequestStatistics(t *testing.T) {
 		t.Fatalf("expected one completion, got %+v", result)
 	}
 	detail := result.Details[0]
-	if detail.Cost == nil || *detail.Cost <= 0 || !detail.CostEstimated {
-		t.Errorf("missing estimated cost: %+v", detail)
+	// The mock provider reports its token counts and deepseek-chat has a
+	// known tariff, so the cost is present and not marked as estimated.
+	if detail.Cost == nil || *detail.Cost <= 0 || detail.CostEstimated {
+		t.Errorf("cost from reported counts: %+v", detail)
 	}
 	if detail.ConnectionID != "conn-deepseek" || detail.Endpoint != "/v1/chat/completions" {
 		t.Errorf("lost routing destination: %+v", detail)

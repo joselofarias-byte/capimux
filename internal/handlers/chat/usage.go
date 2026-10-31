@@ -135,7 +135,10 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 		}
 	}
 
-	tokensEstimated := usage.PromptTokens == 0 || usage.CompletionTokens == 0
+	// tokensEstimated is set only when a count is replaced by the character
+	// estimate below: the upstream sent no count although there was text to
+	// count. A real zero (for example an empty completion) stays measured.
+	tokensEstimated := false
 
 	// Fallback token estimation if upstream emitted zero tokens
 	if usage.PromptTokens == 0 && len(requestBody) > 0 {
@@ -143,12 +146,14 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 		if usage.PromptTokens == 0 {
 			usage.PromptTokens = 1
 		}
+		tokensEstimated = true
 	}
 	if usage.CompletionTokens == 0 && len(respContent) > 0 {
 		usage.CompletionTokens = CountValueChars(respContent) / 4
 		if usage.CompletionTokens == 0 {
 			usage.CompletionTokens = 1
 		}
+		tokensEstimated = true
 	}
 
 	totalTokens := usage.PromptTokens + usage.CompletionTokens
@@ -178,9 +183,14 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 	now := time.Now().UTC()
 	reqID := uuid.NewString()
 	reqMsgs := extractRequestMessages(requestBody)
+	// cost is null without a known tariff: unknown is not free. With a known
+	// tariff the value is exact for the counts reported, so costEstimated is
+	// true only when those counts were themselves estimated.
 	var detailCost *float64
+	costEstimated := false
 	if _, known := pricing.GetPricingForModel(info.Provider, info.Model); known {
 		detailCost = &cost
+		costEstimated = tokensEstimated
 	}
 
 	reqData, err := json.Marshal(map[string]any{
@@ -188,7 +198,7 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 		"connectionId": info.ConnectionID, "status": "success",
 		"timestamp": now.Format("2006-01-02T15:04:05.000Z"),
 		"latency":   map[string]int64{"ttft": ttftMs, "total": latencyMs},
-		"cost":      detailCost, "costEstimated": true, "tokensEstimated": tokensEstimated,
+		"cost":      detailCost, "costEstimated": costEstimated, "tokensEstimated": tokensEstimated,
 		"endpoint": info.Endpoint,
 		"tokens": map[string]int{
 			"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.CompletionTokens,
