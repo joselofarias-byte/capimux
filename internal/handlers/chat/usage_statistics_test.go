@@ -2,6 +2,7 @@ package chat
 
 import (
 	json "encoding/json/v2"
+	"strings"
 	"testing"
 
 	"9router/proxy/internal/db"
@@ -113,5 +114,43 @@ func TestRequestStatisticsEstimationFlags(t *testing.T) {
 					detail.TokensEstimated, detail.CostEstimated, detail.Cost, tt.wantTokensEstimate, tt.wantCostEstimate, tt.wantCost)
 			}
 		})
+	}
+}
+
+// The statistics added to request details are counts and metadata only: with
+// content capture off (the GROK-004 / DATA-01 default) the record must keep
+// cost, endpoint and account while carrying no prompt text and no API key.
+func TestRequestStatisticsDoNotPersistContentOrCredentials(t *testing.T) {
+	t.Setenv("CAPIMUX_CAPTURE_REQUEST_CONTENT", "")
+	const promptCanary = "STATS-PROMPT-CANARY-7f3a"
+	const keyCanary = "sk-stats-key-canary-9b1c"
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	handler := NewChatHandler(repo)
+	body := []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"` + promptCanary + `"}]}`)
+	info := &UsageLogInfo{Provider: "deepseek", Model: "deepseek-chat", ConnectionID: "statistics-account", Endpoint: "/v1/chat/completions", APIKey: keyCanary}
+	handler.LogUsage(info, &translator.OpenAIUsage{PromptTokens: 100, CompletionTokens: 40, CachedTokens: 80}, 1000, body, nil)
+	rows, _, err := repo.GetRequestDetailsPaged(10, 0)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	raw := rows[0]
+	if strings.Contains(raw, promptCanary) {
+		t.Fatalf("prompt content persisted with capture off: %s", raw)
+	}
+	if strings.Contains(raw, keyCanary) || strings.Contains(raw, "sk-stats") {
+		t.Fatalf("API key persisted in request statistics: %s", raw)
+	}
+	var detail struct {
+		Cost         *float64 `json:"cost"`
+		Endpoint     string   `json:"endpoint"`
+		ConnectionID string   `json:"connectionId"`
+	}
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Cost == nil || detail.Endpoint != info.Endpoint || detail.ConnectionID != info.ConnectionID {
+		t.Errorf("statistics lost with capture off: %+v", detail)
 	}
 }
