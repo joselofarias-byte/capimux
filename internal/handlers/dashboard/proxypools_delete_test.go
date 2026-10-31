@@ -12,6 +12,7 @@ import (
 // and report boundConnectionCount; unbound pools delete with 200.
 func TestDeleteProxyPoolBoundConflict(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 
 	if _, err := repo.RawDB().Exec(`CREATE TABLE IF NOT EXISTS proxyPools (
