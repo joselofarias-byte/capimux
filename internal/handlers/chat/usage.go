@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +77,12 @@ func (h *ChatHandler) LogFailure(
 	if !captureContent {
 		message = "request failed"
 	}
+	// The error type and code are short identifiers chosen by the upstream
+	// API, not request content, so they stay even when capture is off.
+	errType, errCode := upstreamErrorIdentifiers(upstreamErr)
+	if statusCode == StatusClientClosedRequest {
+		errType, errCode = "client_closed_request", ""
+	}
 	var responseContent string
 	if captureContent && metrics != nil {
 		responseContent = metrics.ResponseBuf.String()
@@ -94,9 +102,12 @@ func (h *ChatHandler) LogFailure(
 			"ttft":  metricsTTFT(metrics),
 			"total": latencyMs,
 		},
-		"tokens":   tokens,
-		"request":  map[string]any{"messages": reqMsgs},
-		"response": map[string]any{"error": message, "status": statusCode, "content": responseContent},
+		"tokens":  tokens,
+		"request": map[string]any{"messages": reqMsgs},
+		"response": map[string]any{
+			"error": message, "status": statusCode, "content": responseContent,
+			"errorType": errType, "errorCode": errCode,
+		},
 	})
 	if marshalErr != nil {
 		return
@@ -111,6 +122,47 @@ func (h *ChatHandler) LogFailure(
 	); insertErr != nil {
 		log.Error("usage", "insert failed request detail failed", "error", insertErr)
 	}
+}
+
+// safeErrorIdentifier accepts only short machine identifiers, so free text
+// (which may echo the prompt) can never ride in through the type or code.
+var safeErrorIdentifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+
+// upstreamErrorIdentifiers extracts error.type and error.code from an
+// upstream JSON error body. Anything that is not a short identifier is dropped.
+func upstreamErrorIdentifiers(ue *upstreamError) (errType, errCode string) {
+	if ue == nil || len(ue.Body) == 0 {
+		return "", ""
+	}
+	var body struct {
+		Error struct {
+			Type any `json:"type"`
+			Code any `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(ue.Body, &body) != nil {
+		return "", ""
+	}
+	return safeIdentifierValue(body.Error.Type), safeIdentifierValue(body.Error.Code)
+}
+
+func safeIdentifierValue(v any) string {
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case float64:
+		if x != float64(int64(x)) {
+			return ""
+		}
+		s = strconv.FormatInt(int64(x), 10)
+	default:
+		return ""
+	}
+	if !safeErrorIdentifier.MatchString(s) {
+		return ""
+	}
+	return s
 }
 
 func metricsTTFT(metrics *streamMetrics) int64 {

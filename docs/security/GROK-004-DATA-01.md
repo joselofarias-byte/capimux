@@ -8,7 +8,8 @@ Status: **review-only**. No deployment or migration has been run.
 * Diagnostic prompt and response *content* is **not persisted by default**. Metrics used for cost/tokens continue to be computed.
 * `CAPIMUX_CAPTURE_REQUEST_CONTENT=true` explicitly re-enables the legacy detailed capture. Use only with informed consent. Current capture is bounded but is **not a guaranteed secrets redactor**; avoid enabling it for shared/multi-tenant workloads.
 * `CAPIMUX_REQUEST_DETAILS_RETENTION_DAYS`: 1–365, default 7. Missing, malformed or out-of-range values fall back to 7 days.
-* Expired `requestDetails` are pruned after roughly every 128 inserts (including first insert), and when viewing details.
+* Expired `requestDetails` are pruned after roughly every 128 inserts (including first insert), and when viewing details at most once every 10 minutes. Reads always filter by the retention cutoff, so expired rows are never shown even when the read skips the purge. A failed cleanup is logged and never reported as a failed insert.
+* With content capture off, a failed request keeps only the HTTP status and the upstream `error.type` / `error.code`, and only when they are short identifiers (`[A-Za-z0-9_.:-]{1,64}`). The message is stored as `request failed`.
 * `DELETE /api/usage/request-details` (admin only) purges all diagnostic records. It requires `X-Capimux-Confirm: purge-request-details`; aggregate usage metrics are retained. No automatic purge is triggered by opening this PR.
 
 ## Important limitations
