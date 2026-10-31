@@ -113,6 +113,7 @@ func keysOf(m map[string]any) []string {
 
 func TestConnectionsEndpoints(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 
@@ -396,6 +397,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 	}
 	bodyBytes, _ := json.Marshal(createBody)
 	req = httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(bodyBytes))
+	asDashboardAdmin(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -415,6 +417,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 
 	// 3. PUT /api/keys/{id}/toggle (toggle status)
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/"+genID+"/toggle", nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -429,6 +432,7 @@ func TestApiKeysEndpoints(t *testing.T) {
 
 	// 4. DELETE /api/keys/{id}
 	req = httptest.NewRequest(http.MethodDelete, "/api/keys/"+genID, nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -643,6 +647,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// 3. ApiKey errors
 	// Toggle non-existent
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/non-existent/toggle", nil)
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -652,6 +657,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// Toggle with explicit isActive
 	// First create a key
 	req = httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader([]byte(`{"id":"key-toggle-test","key":"sk-toggle-test"}`)))
+	asDashboardAdmin(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -662,6 +668,7 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	// Set explicit false
 	explicitFalse := []byte(`{"isActive":false}`)
 	req = httptest.NewRequest(http.MethodPut, "/api/keys/key-toggle-test/toggle", bytes.NewReader(explicitFalse))
+	asDashboardAdmin(t, req)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -705,5 +712,17 @@ func TestEdgeAndErrorCases(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("save disabled models with disabledModels format expected 200, got %d", rec.Code)
+	}
+}
+
+// openDashboard sets requireLogin=false, the owner's "open dashboard" mode.
+// Handler-level tests call handlers without the auth middleware or any
+// credential; with login on (the default) the client-key guards would treat
+// them as a bare client API key. Tests of those guards build their own
+// sessions, CLI tokens and keys.
+func openDashboard(t *testing.T, repo *db.Repo) {
+	t.Helper()
+	if err := repo.UpdateSettingsRaw(map[string]any{"requireLogin": false}); err != nil {
+		t.Fatalf("open dashboard: %v", err)
 	}
 }

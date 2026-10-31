@@ -600,10 +600,15 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 
 			var entrySuccess bool
 			// Try up to 10 connections for this model entry
+			// Accounts that already failed this entry in this pass. Only
+			// retryable statuses land in excludeIDs (shared across entries);
+			// without this a 4xx/500/network failure re-picked the same
+			// account up to ten times.
+			var triedThisEntry []string
 			for connAttempt := 0; connAttempt < 10; connAttempt++ {
 				cfg, known := providers.KnownProviders[modelInfo.Provider]
 				isNoAuthProvider := known && cfg.NoAuth
-				connID, connData, isKnownNoAuth, connErr := h.comboConnection(modelInfo, excludeIDs)
+				connID, connData, isKnownNoAuth, connErr := h.comboConnection(modelInfo, comboExclusions(excludeIDs, triedThisEntry))
 				if connErr != nil {
 					break
 				}
@@ -649,6 +654,7 @@ func (h *ChatHandler) handleComboFallback(ctx context.Context, w http.ResponseWr
 				}
 
 				if fwdErr != nil {
+					triedThisEntry = append(triedThisEntry, connID)
 					if cw.IsCommitted() {
 						log.Error("combo", "upstream error after response started", "error", fwdErr)
 						return
@@ -802,10 +808,15 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 
 			var entrySuccess bool
 			// Try up to 10 connections for this model entry
+			// Accounts that already failed this entry in this pass. Only
+			// retryable statuses land in excludeIDs (shared across entries);
+			// without this a 4xx/500/network failure re-picked the same
+			// account up to ten times.
+			var triedThisEntry []string
 			for connAttempt := 0; connAttempt < 10; connAttempt++ {
 				cfg, known := providers.KnownProviders[modelInfo.Provider]
 				isNoAuthProvider := known && cfg.NoAuth
-				connID, connData, isKnownNoAuth, connErr := h.comboConnection(modelInfo, excludeIDs)
+				connID, connData, isKnownNoAuth, connErr := h.comboConnection(modelInfo, comboExclusions(excludeIDs, triedThisEntry))
 				if connErr != nil {
 					break
 				}
@@ -841,6 +852,7 @@ func (h *ChatHandler) handleMessagesComboFallback(ctx context.Context, w http.Re
 				})
 
 				if fwdErr != nil {
+					triedThisEntry = append(triedThisEntry, connID)
 					if ctx.Err() != nil {
 						lastErr = &upstreamError{StatusCode: StatusClientClosedRequest, Body: []byte(`{"error":{"message":"client closed request","type":"client_closed_request","code":499}}`)}
 						break
@@ -1079,4 +1091,15 @@ func (h *ChatHandler) ResetComboState(comboName string) {
 	} else {
 		h.stickyState = make(map[string]*comboStickyState)
 	}
+}
+
+// comboExclusions joins the request-wide exclusions with the accounts already
+// tried for the current entry, without aliasing either slice.
+func comboExclusions(excludeIDs, tried []string) []string {
+	if len(tried) == 0 {
+		return excludeIDs
+	}
+	out := make([]string, 0, len(excludeIDs)+len(tried))
+	out = append(out, excludeIDs...)
+	return append(out, tried...)
 }

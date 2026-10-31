@@ -135,6 +135,28 @@ func (h *DashboardHandler) HandleUpdateProxyPool(w http.ResponseWriter, r *http.
 		return
 	}
 
+	if h.requiresAdminForPosture(r) {
+		// Compare against the raw stored row (not the cached, normalised
+		// GetProxyPool view) so re-saving an unchanged pool is not a change.
+		var current map[string]any
+		if pools, lerr := h.Repo.ListProxyPools(); lerr == nil {
+			for _, p := range pools {
+				if pid, _ := p["id"].(string); pid == id {
+					current = p
+					break
+				}
+			}
+		}
+		if current == nil {
+			handlerutil.WriteJSONError(w, http.StatusNotFound, "proxy pool not found")
+			return
+		}
+		if key, changed := changedProxyPoolDestination(current, updates); changed {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar el destino de un proxy pool ("+key+")"))
+			return
+		}
+	}
+
 	if err := h.Repo.UpdateProxyPool(id, updates); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
