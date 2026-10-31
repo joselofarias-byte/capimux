@@ -660,6 +660,29 @@ Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` va
 
 Este documento no contiene claves, secretos ni tokens.
 
+### Cierre de verificación de #142 — Free Best: failover solo en rutas gratuitas elegibles (31/10, 15:20 UTC-3)
+
+- **Rama:** `cursor/free-best-engine-f768`. Se mergeó `main` `3e1e05b2` y quedó el merge commit `9839a3b7`.
+- **Conflicto:** solo en `internal/handlers/chat/fallback_test.go`, en el mismo test inestable que ya habían corregido la rama y #165. Me quedé con la versión de `main`, que usa `isoRetryAfterBody` y ya estaba revisada y mergeada en #165. Ningún archivo de código de producción tuvo conflicto.
+- **Defaults:** Free Best no se activa por defecto y el proveedor por defecto no cambia. Los endpoints de diagnóstico nuevos (`/api/admin/free-best` y `/api/admin/explain-route`) quedan detrás de `RequireAdminAuth`. Se mantiene el comportamiento de #157: ante un 4xx permanente, se prueba cada cuenta una sola vez.
+- **Batería** (worktree limpio en `9839a3b7`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | 0 |
+| `go test -race -count=1 ./...` | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10` de 70 tests de free-best y fallback (`./internal/handlers/chat`, `./internal/proxy/...`, `./internal/providers`) | 0 |
+| `go test -tags=integration -count=10` de `TestFreeBestProductionRouterFailover` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **GitHub en `9839a3b7`:** `MERGEABLE` / `CLEAN`, con CI en verde.
+- **Estado:** queda listo para revisión si el CI de este commit de documentación también pasa. No está mergeado.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
