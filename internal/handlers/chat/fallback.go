@@ -19,7 +19,9 @@ import (
 	"9router/proxy/internal/adaptive"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/promptinject"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/tokensaver"
@@ -552,6 +554,8 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		DurationMs: latencyMs,
 		TTFTMs:     metrics.TTFT,
 	})
+	// Provider/model health for the opt-in "health" combo strategy.
+	recordComboHealth(ctx, provider, model, completed, fwdErr, latencyMs)
 
 	usage := translator.GetAndClearUsage(ctx)
 	// Shadow-only telemetry: never changes routing, never persists raw payloads.
@@ -593,7 +597,15 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			APIKey:       apiKey,
 			Endpoint:     endpoint,
 		}
-		h.logUsage(logInfo, usage, latencyMs, body, metrics)
+		if usage.PromptTokens == 0 && promptinject.Injected(ctx) && len(body) > 0 {
+			// Estimate from the body really sent (with the injected
+			// instructions) before the log copy is scrubbed.
+			usage.PromptTokens = max(CountValueChars(body)/4, 1)
+		}
+		h.logUsage(logInfo, usage, latencyMs, promptinject.ScrubForLog(ctx, body), metrics)
+		// Per-key token quotas (no-op unless enabled): logUsage has already
+		// filled in estimated tokens when the upstream reported none.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
 		fwdErr = nil
 		return nil
 	}
@@ -615,9 +627,13 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		usage,
 		fwdErr,
 		latencyMs,
-		body,
+		promptinject.ScrubForLog(ctx, body),
 		metrics,
 	)
+	if usage != nil {
+		// Tokens a failed or aborted stream already consumed still count.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
+	}
 	if isClientCanceled(ctx, fwdErr) {
 		log.Info("fallback", "client canceled request", "provider", provider, "model", model, "conn", connectionID)
 	} else if projectProbeCached(connectionID) {
