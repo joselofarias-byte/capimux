@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-31, 03:16 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-30, 13:40 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -562,6 +562,44 @@ Confirmado en GitHub: #158, #159, #160, #161 y #162 estaban mergeados (ciclo 10)
 - #131: solo agrega un documento de auditoría.
 - Con dependencia pendiente: #132 y #138, con base `feat/free-best-dynamic-routing` (452 commits detrás de main, en conflicto, y sus PR #14 y #111 cerrados). Hay que cambiarles la base a main antes de evaluarlos.
 - #134, #135 y #137 ya estaban cerrados.
+
+### Cierre de verificación de #166 (31/10, 09:10 UTC-3)
+
+- **Rama:** `feat/agent-supervisor-v1-main-20261030`.
+- **Head verificado:** `632906cd53cb2ad36bb07736a4037b9f087a434e`. A este commit se le suma solo esta sección de documentación.
+- **Base `main`:** `bdef47b54f1e761d828f3fe91dce1c60c3db0564`. No avanzó y la rama ya lo contiene, así que no hubo merge de `main` ni conflictos.
+- **Batería** (corrida a las 06:20 UTC-3 en un worktree limpio del head; no se repitió porque ni `main` ni el head cambiaron):
+
+| Comando | RC |
+|---|---|
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | 0 |
+| `go test -race -count=1 ./internal/agentsupervisor/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+
+- **GitHub en `632906cd`:** `MERGEABLE` / `CLEAN`. CI en verde: test, Go race detector, Integration tests, Build Docker image y Vercel.
+- **Estado:** listo para la decisión de José Luis. No mergeado ni aprobado.
+
+### Cierre de verificación de #167 (31/10, 09:10 UTC-3)
+
+- **Rama:** `feat/local-model-discovery-main-20261030`.
+- **Head verificado:** `cffd51d7d6451dd864215f73b01a568eba7952c5`. A este commit se le suma solo esta sección de documentación.
+- **Base `main`:** `bdef47b54f1e761d828f3fe91dce1c60c3db0564`. No avanzó y la rama ya lo contiene, así que no hubo merge de `main` ni conflictos.
+- **Batería** (corrida a las 06:20 UTC-3 en un worktree limpio del head; no se repitió porque ni `main` ni el head cambiaron):
+
+| Comando | RC |
+|---|---|
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | 0 |
+| `go test -race -count=1 ./internal/app/... ./internal/controlplane/discovery/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+
+- **GitHub en `cffd51d7`:** `MERGEABLE` / `CLEAN`. CI en verde: test, Go race detector, Integration tests, Build Docker image y Vercel.
+- **Estado:** listo para la decisión de José Luis. No mergeado ni aprobado.
 
 ### Ciclo 13 — #164 (manifest firmado Ed25519, OPS-01) listo para revisión (31/10, 03:05–03:20 UTC-3)
 
