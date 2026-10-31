@@ -13,6 +13,7 @@
   } from './api/client'
   import AnalyticsView from './components/analytics/AnalyticsView.svelte'
   import ApiKeysView from './components/ApiKeysView.svelte'
+  import KeyQuotasView from './components/keyquota/KeyQuotasView.svelte'
   import CliToolsView from './components/CliToolsView.svelte'
   import CombosView from './components/combos/CombosView.svelte'
   import ConnectionsView from './components/connections/ConnectionsView.svelte'
@@ -23,6 +24,8 @@
   import MediaKindView from './components/media/MediaKindView.svelte'
   import MediaProviderDetail from './components/media/MediaProviderDetail.svelte'
   import ProxyPoolsView from './components/ProxyPoolsView.svelte'
+  import PromptInjectionView from './components/promptinject/PromptInjectionView.svelte'
+  import PlaygroundView from './components/promptinject/PlaygroundView.svelte'
   import ProfileSettingsView from './components/ProfileSettingsView.svelte'
   import MediaWebView from './components/media/MediaWebView.svelte'
   import QuotaTrackerView from './components/QuotaTrackerView.svelte'
@@ -364,6 +367,8 @@
               <MultiagentView />
             {:else if activeTab === 'analytics'}
               <AnalyticsView {connections} {providerNodes} />
+            {:else if activeTab === 'key-quotas'}
+              <KeyQuotasView />
             {:else if activeTab === 'quota'}
               <QuotaTrackerView {connections} />
             {:else if activeTab === 'token-saver'}
@@ -544,6 +549,10 @@
                   onSelectProvider={(kind, id) => navigateMediaProvider(kind, id)}
                 />
               {/if}
+            {:else if activeTab === 'prompt-injection'}
+              <PromptInjectionView {combos} {apiKeys} />
+            {:else if activeTab === 'playground'}
+              <PlaygroundView {combos} />
             {:else if activeTab === 'proxy-pools'}
               <ProxyPoolsView />
             {:else if activeTab === 'skills'}
