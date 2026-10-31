@@ -14,7 +14,8 @@ func TestDashboardRequestStatistics(t *testing.T) {
 	if res.Status != http.StatusOK {
 		t.Fatalf("completion status %d: %s", res.Status, truncate(res.Body))
 	}
-	res = env.Get(t, "/api/usage/request-details?limit=20&offset=0")
+	// Read as the dashboard owner: the details become admin-only with #139.
+	res = env.Get(t, "/api/usage/request-details?limit=20&offset=0", operator(t)...)
 	if res.Status != http.StatusOK {
 		t.Fatalf("statistics status %d: %s", res.Status, truncate(res.Body))
 	}
