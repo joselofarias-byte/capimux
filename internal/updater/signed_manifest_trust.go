@@ -14,6 +14,7 @@ package updater
 // See docs/security/GROK-004-OPS-01.md for how to generate the key and sign.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -21,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -31,11 +33,41 @@ import (
 // embeddedManifestPublicKeys maps a key ID to the standard-base64 encoding of a
 // raw 32-byte Ed25519 public key. Only public keys belong here; the private key
 // never enters the repository.
+//
+// The owner fills this in (docs/security/GROK-004-OPS-01.md, "Embeber la clave
+// pública"); TestEmbeddedManifestPublicKeysWellFormed checks the format:
+//
+//	var embeddedManifestPublicKeys = map[string]string{
+//		"capimux-release-2026": "<44 caracteres base64 = 32 bytes>",
+//	}
+//
+// Key IDs are 3–64 characters of [a-z0-9._-], starting with a letter or digit.
 var embeddedManifestPublicKeys = map[string]string{}
 
 // DefaultSignedManifestURL is where a signed build looks for the signed
-// manifest envelope. UPDATE_SIGNED_MANIFEST_URL overrides it (HTTPS only).
-var DefaultSignedManifestURL = "https://raw.githubusercontent.com/joselofarias-byte/capimux/main/version.signed.json"
+// manifest envelope: the asset the release workflow uploads next to the
+// binaries of the latest stable release. UPDATE_SIGNED_MANIFEST_URL overrides
+// it (HTTPS only).
+var DefaultSignedManifestURL = "https://github.com/joselofarias-byte/capimux/releases/latest/download/version.signed.json"
+
+var manifestKeyIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+
+// validateEmbeddedManifestKey rejects a key ID or public key that cannot be a
+// real release key: a malformed ID, anything but standard base64 of exactly 32
+// bytes, or an all-zero placeholder.
+func validateEmbeddedManifestKey(id, encoded string) (ed25519.PublicKey, error) {
+	if !manifestKeyIDPattern.MatchString(id) {
+		return nil, fmt.Errorf("updater: embedded manifest key ID %q must be 3-64 chars of [a-z0-9._-]", id)
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("updater: embedded manifest key %q is not a base64 Ed25519 public key", id)
+	}
+	if bytes.Equal(raw, make([]byte, ed25519.PublicKeySize)) {
+		return nil, fmt.Errorf("updater: embedded manifest key %q is an all-zero placeholder", id)
+	}
+	return ed25519.PublicKey(raw), nil
+}
 
 const (
 	signedManifestProduct = "capimux"
@@ -57,11 +89,11 @@ func trustedManifestKeys() (map[string]ed25519.PublicKey, error) {
 		if strings.TrimSpace(id) == "" {
 			return nil, errors.New("updater: embedded manifest key with empty key ID")
 		}
-		raw, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("updater: embedded manifest key %q is not a base64 Ed25519 public key", id)
+		pub, err := validateEmbeddedManifestKey(id, encoded)
+		if err != nil {
+			return nil, err
 		}
-		keys[id] = ed25519.PublicKey(raw)
+		keys[id] = pub
 	}
 	return keys, nil
 }

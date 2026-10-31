@@ -16,6 +16,25 @@ import (
 
 const maxSignedManifestDownload = 512 << 10
 
+// githubReleaseAssetHosts are the only hosts a signed-manifest fetch may be
+// redirected to from github.com: GitHub serves
+// releases/latest/download/<asset> as github.com -> github.com/<tag> ->
+// release-assets.githubusercontent.com. Authenticity still comes from the
+// Ed25519 signature; this only keeps the redirect policy as narrow as possible.
+var githubReleaseAssetHosts = map[string]bool{
+	"release-assets.githubusercontent.com": true,
+	"objects.githubusercontent.com":        true,
+}
+
+// signedManifestHostAllowed reports whether a fetch that started at
+// originalHost may continue at host.
+func signedManifestHostAllowed(originalHost, host string) bool {
+	if strings.EqualFold(host, originalHost) {
+		return true
+	}
+	return strings.EqualFold(originalHost, "github.com") && githubReleaseAssetHosts[strings.ToLower(host)]
+}
+
 func validateSignedManifestSource(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" ||
@@ -27,7 +46,8 @@ func validateSignedManifestSource(raw string) error {
 
 // checkSignedManifestCandidate checks a signed manifest against an independently
 // pinned trust policy. The caller must supply trusted public keys. Redirects to
-// another host or to HTTP fail closed even when HTTP client allows redirects.
+// HTTP, or to another host (except github.com to its release-asset CDN), fail
+// closed even when the HTTP client allows redirects.
 // Successful lookup still does not install an executable.
 func checkSignedManifestCandidate(ctx context.Context, rawURL string, policy manifestPolicy, suppliedClient *http.Client) (*UpdateInfo, error) {
 	if err := validateSignedManifestSource(rawURL); err != nil {
@@ -46,7 +66,7 @@ func checkSignedManifestCandidate(ctx context.Context, rawURL string, policy man
 		if err := validateSignedManifestSource(req.URL.String()); err != nil {
 			return err
 		}
-		if !strings.EqualFold(req.URL.Host, originalHost) {
+		if !signedManifestHostAllowed(originalHost, req.URL.Host) {
 			return errors.New("updater: signed manifest redirect changed host")
 		}
 		if len(via) >= 5 {
@@ -69,7 +89,7 @@ func checkSignedManifestCandidate(ctx context.Context, rawURL string, policy man
 	if err := validateSignedManifestSource(resp.Request.URL.String()); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(resp.Request.URL.Host, originalHost) {
+	if !signedManifestHostAllowed(originalHost, resp.Request.URL.Host) {
 		return nil, errors.New("updater: unexpected signed manifest host")
 	}
 	if resp.StatusCode != http.StatusOK {
