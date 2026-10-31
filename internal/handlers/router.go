@@ -147,6 +147,8 @@ func SetupRoutes(r interface {
 func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
 	dashH := dashboard.NewDashboardHandler(repo)
 	ssoH := sso.NewHandler(repo)
+	// Health tracker behind the opt-in "health" combo strategy: admin only.
+	setupComboHealthRoutes(r, repo)
 
 	// Multiagent calls share the dashboard authentication guard.
 	r.Get("/api/multiagent/policy", multiagent.PolicyHandler)
