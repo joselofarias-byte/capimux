@@ -313,7 +313,7 @@ func (r *Repo) SetComboStrategy(comboName string, strat ComboStrategy) error {
 // matches what the router's applyComboStrategy and the fusion path handle and
 // what the dashboard offers, plus the two aliases they already treat as
 // synonyms ("roundrobin" for round-robin, "first-model" for fallback).
-var ValidComboStrategies = []string{"fallback", "first-model", "round-robin", "roundrobin", "sticky", "capacity", "fusion"}
+var ValidComboStrategies = []string{"fallback", "first-model", "round-robin", "roundrobin", "sticky", "capacity", "fusion", "health"}
 
 // IsValidComboStrategy reports whether s is a strategy a combo can be saved with.
 func IsValidComboStrategy(s string) bool {
