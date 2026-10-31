@@ -18,7 +18,30 @@ jobs:
     name: Build release binaries
     runs-on: ubuntu-latest
     steps:
+      # GROK-004 / OPS-01: a release is only published with its Ed25519-signed
+      # manifest. Fail before building anything when the owner has not
+      # configured the signing secret (docs/RELEASE-CHECKLIST.es.md).
+      - name: Require manifest signing key
+        env:
+          CAPIMUX_MANIFEST_SIGNING_KEY: ${{ secrets.CAPIMUX_MANIFEST_SIGNING_KEY }}
+        run: |
+          if [ -z "${CAPIMUX_MANIFEST_SIGNING_KEY}" ]; then
+            echo "::error::Falta el secreto CAPIMUX_MANIFEST_SIGNING_KEY: no se publica un release sin version.signed.json (ver docs/RELEASE-CHECKLIST.es.md)."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
+
+      # The binaries embed the VERSION file (Makefile -X CurrentVersion) while
+      # the signed manifest announces the tag. If they differ, every install
+      # would see the release as newer than itself and update forever.
+      - name: Check tag matches VERSION
+        run: |
+          want="v$(tr -d '[:space:]' < VERSION)"
+          if [ "${GITHUB_REF_NAME}" != "${want}" ]; then
+            echo "::error::El tag ${GITHUB_REF_NAME} no coincide con VERSION (${want}). Usá scripts/bump-version.sh y volvé a taggear."
+            exit 1
+          fi
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -57,6 +80,29 @@ jobs:
             9router-go-windows-amd64.exe 9router-go-android-arm64
           cat version.json
 
+      # Signs version.signed.json with the key from the secret, after checking
+      # that it matches a public key embedded in this commit and that every
+      # platform verifies. Any failure stops the job: no binary is uploaded
+      # without the signed manifest next to it.
+      - name: Sign update manifest (Ed25519)
+        env:
+          CAPIMUX_MANIFEST_SIGNING_KEY: ${{ secrets.CAPIMUX_MANIFEST_SIGNING_KEY }}
+        run: |
+          if [ -z "${CAPIMUX_MANIFEST_SIGNING_KEY}" ]; then
+            echo "::error::Falta el secreto CAPIMUX_MANIFEST_SIGNING_KEY."
+            exit 1
+          fi
+          go run ./cmd/release-manifest \
+            -version "${GITHUB_REF_NAME}" \
+            -base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            -sums SHA256SUMS.txt \
+            -out "" \
+            -signed-out version.signed.json \
+            9router-go-linux-amd64 9router-go-linux-arm64 \
+            9router-go-darwin-amd64 9router-go-darwin-arm64 \
+            9router-go-windows-amd64.exe 9router-go-android-arm64
+          test -s version.signed.json
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -91,10 +137,26 @@ jobs:
             9router-go-android-arm64
             SHA256SUMS.txt
             version.json
+            version.signed.json
           body_path: /tmp/changelog.md
           generate_release_notes: false
+          # Created as a draft and published only after every asset (binaries
+          # and both manifests) is uploaded, so releases/latest never exposes
+          # binaries without version.signed.json next to them.
+          draft: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release (binaries and signed manifest together)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' > /tmp/assets.txt
+          grep -qx version.signed.json /tmp/assets.txt
+          grep -qx version.json /tmp/assets.txt
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
 
   docker:
     name: Build and push Docker image
