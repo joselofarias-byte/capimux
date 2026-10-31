@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="joselofarias-byte/9router-go"
+REPO="joselofarias-byte/capimux"
 REF="main"
 CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
 SKILL_DIR="$CODEX_HOME_DIR/skills/9router-code-audit"

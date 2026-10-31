@@ -36,6 +36,17 @@ type SyncedModelLimits struct {
 	MaxOutput     int `json:"maxOutput,omitempty"`
 }
 
+// SyncedModelVariant is one upstream id that shares its catalog base with
+// other ids of the same provider ("nvidia/nemotron-3-ultra" and
+// "nvidia/nemotron-3-ultra:free") but declares different limits or
+// modalities. The base key keeps the preferred variant; the others keep their
+// own, unmixed values here, keyed by their full lowercased id.
+type SyncedModelVariant struct {
+	ContextWindow int                   `json:"contextWindow,omitempty"`
+	MaxOutput     int                   `json:"maxOutput,omitempty"`
+	Modalities    SyncedModelModalities `json:"modalities"`
+}
+
 // SyncedCatalog represents the processed catalog file written to disk / kept in
 // memory. The file is shared with upstream, whose writer emits `syncedAt` as
 // epoch milliseconds and adds `v`/`etag` fields — so SyncedAt is written as an
@@ -47,6 +58,9 @@ type SyncedCatalog struct {
 	SyncedAt  string                                  `json:"syncedAt,omitempty"`
 	Models    map[string]SyncedModelModalities        `json:"models"`
 	Providers map[string]map[string]SyncedModelLimits `json:"providers"`
+	// Variants is additive (absent in older files): provider -> full
+	// lowercased upstream id -> that variant's own limits and modalities.
+	Variants map[string]map[string]SyncedModelVariant `json:"variants,omitempty"`
 }
 
 // UnmarshalJSON accepts syncedAt as either an ISO string (this build's writer)
@@ -151,6 +165,27 @@ func catalogProviderKeys(providerID string) []string {
 	return keys
 }
 
+// catalogVariant returns the exact-id variant entry for provider/model, if the
+// sync filed one. Variants are stored under the models.dev provider id, so
+// the local alias is tried too.
+func catalogVariant(provider, model string) (SyncedModelVariant, bool) {
+	if globalCatalog == nil || globalCatalog.Variants == nil {
+		return SyncedModelVariant{}, false
+	}
+	id := strings.ToLower(model)
+	p := strings.ToLower(provider)
+	keys := []string{p}
+	if mapped, ok := ProviderAliases[p]; ok {
+		keys = append(keys, mapped)
+	}
+	for _, key := range keys {
+		if v, ok := globalCatalog.Variants[key][id]; ok {
+			return v, true
+		}
+	}
+	return SyncedModelVariant{}, false
+}
+
 // GetCatalogModalities looks up the synced input modalities for a
 // provider/model pair. models.dev records modalities per gateway, and
 // gateways disagree about the same weights (some do not proxy images at all),
@@ -165,6 +200,12 @@ func GetCatalogModalities(provider, model string) *SyncedModelModalities {
 
 	catalogMu.RLock()
 	defer catalogMu.RUnlock()
+	if v, ok := catalogVariant(provider, model); ok {
+		// The exact variant answers with its own modalities, even all-false:
+		// it must not inherit another variant's.
+		m := v.Modalities
+		return &m
+	}
 	if globalCatalog == nil || globalCatalog.Models == nil {
 		return nil
 	}
@@ -200,6 +241,9 @@ func GetCatalogLimits(provider, model string) (contextWindow, maxOutput int) {
 
 	catalogMu.RLock()
 	defer catalogMu.RUnlock()
+	if v, ok := catalogVariant(provider, model); ok {
+		return v.ContextWindow, v.MaxOutput
+	}
 	if globalCatalog == nil || globalCatalog.Providers == nil {
 		return 0, 0
 	}
@@ -301,81 +345,25 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB limit
 	if err != nil {
-		return fmt.Errorf("read catalog body: %w", err)
+		return rejectCatalog(resp.StatusCode, len(body), "no se pudo leer el cuerpo: "+err.Error())
 	}
 
+	// Validate first, publish after: an HTTP 200 whose body is null, {}, an
+	// empty catalog or not the models.dev shape never replaces the catalog in
+	// memory, the cache file or the stored ETag, so the next manual or
+	// periodic sync retries from scratch.
 	// models.dev format: map of providerID -> providerData { models: map[modelID]modelData }.
-	// Each model declares `modalities: { input: ["text","image",…], output: […] }`;
-	// an earlier revision used a boolean `modality` map, which no longer exists,
-	// so reading that key silently produced an all-false catalog.
-	var rawData map[string]struct {
-		Models map[string]struct {
-			Modalities struct {
-				Input []string `json:"input"`
-			} `json:"modalities"`
-			Limit *struct {
-				Context int `json:"context"`
-				Output  int `json:"output"`
-			} `json:"limit"`
-		} `json:"models"`
-	}
-
+	var rawData map[string]modelsDevProvider
 	if err := json.Unmarshal(body, &rawData); err != nil {
-		syncStateMu.Lock()
-		syncState.LastError = err.Error()
-		syncStateMu.Unlock()
-		return fmt.Errorf("decode catalog json: %w", err)
+		return rejectCatalog(resp.StatusCode, len(body), "estructura inválida: "+err.Error())
+	}
+	if reason := invalidCatalogReason(rawData); reason != "" {
+		return rejectCatalog(resp.StatusCode, len(body), reason)
 	}
 
-	modelsMap := make(map[string]SyncedModelModalities)
-	providersMap := make(map[string]map[string]SyncedModelLimits)
-
-	for provID, provData := range rawData {
-		// Several upstream ids normalize to the same base (claude-opus-4-thinking:1024,
-		// :8192, :32768 …) and must not stack their modalities.
-		seen := make(map[string]bool, len(provData.Models))
-		for modelID, mData := range provData.Models {
-			base := catalogBaseID(modelID)
-			if seen[base] {
-				continue
-			}
-			seen[base] = true
-
-			// Modalities, keyed provider+model: gateways disagree about the same
-			// weights, and a bare model key would let a short id collide across
-			// vendors ("auto", "free", "efficient" are router modes in one catalog
-			// and model names in another). Same rule as upstream sync.js.
-			var declared SyncedModelModalities
-			for _, input := range mData.Modalities.Input {
-				switch input {
-				case "image":
-					declared.Vision = true
-				case "pdf":
-					declared.PDF = true
-				case "audio":
-					declared.AudioInput = true
-				case "video":
-					declared.VideoInput = true
-				}
-			}
-			if declared != (SyncedModelModalities{}) {
-				for _, key := range catalogProviderKeys(provID) {
-					modelsMap[key+":"+base] = declared
-				}
-			}
-
-			// Limits belong to the gateway — each truncates differently — so they
-			// stay keyed by provider + model.
-			if mData.Limit != nil && (mData.Limit.Context > 0 || mData.Limit.Output > 0) {
-				if providersMap[provID] == nil {
-					providersMap[provID] = make(map[string]SyncedModelLimits)
-				}
-				providersMap[provID][base] = SyncedModelLimits{
-					ContextWindow: mData.Limit.Context,
-					MaxOutput:     mData.Limit.Output,
-				}
-			}
-		}
+	modelsMap, providersMap, variantsMap := buildSyncedCatalog(rawData)
+	if len(modelsMap) == 0 && len(providersMap) == 0 {
+		return rejectCatalog(resp.StatusCode, len(body), "ningún modelo declara límites ni modalidades")
 	}
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
@@ -383,6 +371,15 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 		SyncedAt:  nowStr,
 		Models:    modelsMap,
 		Providers: providersMap,
+		Variants:  variantsMap,
+	}
+
+	// The cache file is replaced atomically (temp file + rename), so a crash
+	// or a full disk leaves the previous file intact, never a truncated one.
+	if filePath != "" {
+		if err := writeCatalogFileAtomic(filePath, synced); err != nil {
+			log.Warn("catalog_sync", "could not write the catalog cache; keeping the previous file", "error", err)
+		}
 	}
 
 	catalogMu.Lock()
@@ -398,16 +395,71 @@ func SyncModelCatalog(ctx context.Context, client *http.Client, filePath string)
 	syncState.ModelCount = len(modelsMap)
 	syncStateMu.Unlock()
 
-	// Write to disk if filePath configured
-	if filePath != "" {
-		_ = os.MkdirAll(filepath.Dir(filePath), 0755)
-		if outBytes, err := json.Marshal(synced, jsontext.WithIndent("  ")); err == nil {
-			_ = os.WriteFile(filePath, outBytes, 0644)
-		}
-	}
-
 	log.Info("catalog_sync", "catalog synchronized successfully", "models", len(modelsMap), "providers", len(providersMap))
 	return nil
+}
+
+// invalidCatalogReason reports why a decoded feed must not replace the
+// catalog, or "" when it is usable: null, {}, providers without models, or no
+// model at all.
+func invalidCatalogReason(rawData map[string]modelsDevProvider) string {
+	if rawData == nil {
+		return "respuesta vacía (null)"
+	}
+	if len(rawData) == 0 {
+		return "catálogo vacío ({})"
+	}
+	total := 0
+	for _, p := range rawData {
+		total += len(p.Models)
+	}
+	if total == 0 {
+		return "ningún proveedor trae modelos"
+	}
+	return ""
+}
+
+// rejectCatalog records a refused sync: LastError for the panel and a warning
+// with only status, size and reason (never the body). The previous catalog,
+// cache file and ETag stay as they were.
+func rejectCatalog(status, size int, reason string) error {
+	syncStateMu.Lock()
+	syncState.LastError = "catálogo rechazado: " + reason
+	syncStateMu.Unlock()
+	log.Warn("catalog_sync", "catalog response rejected; keeping the previous catalog", "status", status, "bytes", size, "reason", reason)
+	return fmt.Errorf("catalog rejected: %s", reason)
+}
+
+func writeCatalogFileAtomic(filePath string, cat *SyncedCatalog) error {
+	outBytes, err := json.Marshal(cat, jsontext.WithIndent("  "))
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(outBytes); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filePath)
 }
 
 // StartBackgroundCatalogSync runs initial sync and 24h timer loop.

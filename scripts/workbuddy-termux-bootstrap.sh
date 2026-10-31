@@ -5,9 +5,15 @@ ROUTER_BASE_URL="${ROUTER_BASE_URL:-http://127.0.0.1:20128}"
 WORKBUDDY_KEYS_URL="https://www.codebuddy.ai/profile/keys"
 WORKBUDDY_PROFILE_URL="https://www.codebuddy.ai/profile"
 WORKBUDDY_PROBE_MODEL="${WORKBUDDY_PROBE_MODEL:-gpt-5.6-luna}"
+# Client API key, used only for the final /chat/completions probe.
 ROUTER_TOKEN="${NINEROUTER_API_KEY:-}"
+# The router's data dir: the admin (CLI) token is derived from files there.
+ROUTER_DATA_DIR="${NINEROUTER_DATA_DIR:-${DATA_DIR:-$HOME/.9router}}"
 CODEBUDDY_KEY=""
 TMP_RESPONSE=""
+# Header files (0600) so tokens never appear in argv, ps or the screen.
+ADMIN_HEADER_FILE=""
+CLIENT_HEADER_FILE=""
 AUDIT_FILE="$HOME/.config/9router-go/workbuddy-last-probe.json"
 
 cleanup() {
@@ -16,6 +22,12 @@ cleanup() {
   if [ -n "${TMP_RESPONSE:-}" ] && [ -f "$TMP_RESPONSE" ]; then
     rm -f "$TMP_RESPONSE"
   fi
+  local f
+  for f in "${ADMIN_HEADER_FILE:-}" "${CLIENT_HEADER_FILE:-}"; do
+    if [ -n "$f" ] && [ -f "$f" ]; then
+      rm -f "$f"
+    fi
+  done
 }
 trap cleanup EXIT INT TERM
 
@@ -99,14 +111,68 @@ read_codebuddy_key() {
   export CODEBUDDY_API_KEY="$CODEBUDDY_KEY"
 }
 
-load_router_token() {
-  if [ -n "$ROUTER_TOKEN" ]; then
-    return 0
+new_header_file() {
+  local f
+  f="$(mktemp)"
+  chmod 600 "$f"
+  printf '%s' "$f"
+}
+
+# private_file succeeds when the file exists and only its owner can read it.
+private_file() {
+  local mode
+  [ -f "$1" ] || return 1
+  mode="$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || true)"
+  [ -n "$mode" ] || return 1
+  [ $((8#$mode & 077)) -eq 0 ]
+}
+
+# load_admin_token prepares the x-9r-cli-token header: the local admin token
+# the router derives from DATA_DIR/machine-id and DATA_DIR/auth/cli-secret
+# (sha256(machine-id + "9r-cli-auth" + cli-secret), first 16 hex chars). It is
+# written straight to a 0600 header file and never printed or logged.
+load_admin_token() {
+  local machine_file="$ROUTER_DATA_DIR/machine-id"
+  local secret_file="$ROUTER_DATA_DIR/auth/cli-secret"
+
+  if [ ! -s "$machine_file" ] || [ ! -s "$secret_file" ]; then
+    # The router creates both files the first time it checks a CLI token.
+    curl -sS --max-time 5 -o /dev/null -H 'x-9r-cli-token: bootstrap-probe' \
+      "$ROUTER_BASE_URL/api/settings" >/dev/null 2>&1 || true
+  fi
+  if [ ! -s "$machine_file" ] || [ ! -s "$secret_file" ]; then
+    return 1
+  fi
+  if ! private_file "$machine_file" || ! private_file "$secret_file"; then
+    say "ERROR: los archivos del token de administrador en $ROUTER_DATA_DIR tienen permisos demasiado abiertos." >&2
+    say "       Ejecutá: chmod 600 \"$machine_file\" \"$secret_file\"" >&2
+    exit 1
+  fi
+  if ! need_cmd sha256sum; then
+    say "ERROR: falta sha256sum (paquete coreutils) para derivar el token de administrador." >&2
+    exit 1
   fi
 
-  if [ -r "$HOME/.config/9router-go/admin-token" ]; then
+  ADMIN_HEADER_FILE="$(new_header_file)"
+  {
+    printf 'x-9r-cli-token: '
+    printf '%s%s%s' "$(tr -d ' \t\r\n' < "$machine_file")" "9r-cli-auth" "$(tr -d ' \t\r\n' < "$secret_file")" |
+      sha256sum | cut -c1-16
+  } > "$ADMIN_HEADER_FILE"
+}
+
+# load_client_token prepares the Authorization header for the probe: a normal
+# client API key from NINEROUTER_API_KEY or ~/.config/9router-go/admin-token
+# (legacy name; its content is a client API key). Optional.
+load_client_token() {
+  if [ -z "$ROUTER_TOKEN" ] && [ -r "$HOME/.config/9router-go/admin-token" ]; then
     ROUTER_TOKEN="$(tr -d '\r\n' < "$HOME/.config/9router-go/admin-token")"
   fi
+  CLIENT_HEADER_FILE="$(new_header_file)"
+  if [ -n "$ROUTER_TOKEN" ]; then
+    printf 'Authorization: Bearer %s\n' "$ROUTER_TOKEN" > "$CLIENT_HEADER_FILE"
+  fi
+  ROUTER_TOKEN=""
 }
 
 ensure_router_running() {
@@ -135,11 +201,11 @@ ensure_router_running() {
 }
 
 import_connection() {
-  load_router_token
-  if [ -z "$ROUTER_TOKEN" ]; then
-    say "ERROR: falta la credencial de 9router-go." >&2
-    say "       No existe ~/.config/9router-go/admin-token y NINEROUTER_API_KEY no está definido." >&2
-    exit 1
+  # Importing credentials is an admin action: it uses the local admin (CLI)
+  # token, never a client API key.
+  if ! load_admin_token; then
+    say "==> No encontré el token de administrador en $ROUTER_DATA_DIR (definí DATA_DIR si 9router-go usa otro directorio)."
+    ADMIN_HEADER_FILE="$(new_header_file)"
   fi
 
   new_tmp_response
@@ -152,7 +218,7 @@ import_connection() {
       curl -sS --max-time 30 \
         -o "$TMP_RESPONSE" \
         -w '%{http_code}' \
-        -H "Authorization: Bearer $ROUTER_TOKEN" \
+        -H "@$ADMIN_HEADER_FILE" \
         -H 'Content-Type: application/json' \
         --data-binary @- \
         "$ROUTER_BASE_URL/api/oauth/codebuddy-intl/import"
@@ -163,8 +229,10 @@ import_connection() {
     if [ -s "$TMP_RESPONSE" ]; then
       jq -c 'del(.apiKey,.accessToken,.refreshToken)' "$TMP_RESPONSE" 2>/dev/null || cat "$TMP_RESPONSE" >&2
     fi
-    if [ "$status" = "401" ]; then
-      say "       El token local no autoriza esta ruta. Definí NINEROUTER_API_KEY con una API key activa de 9router-go." >&2
+    if [ "$status" = "401" ] || [ "$status" = "403" ]; then
+      say "       Importar credenciales requiere el token de administrador local (x-9r-cli-token)." >&2
+      say "       Ejecutá este script en el mismo equipo y usuario que 9router-go, con el mismo DATA_DIR ($ROUTER_DATA_DIR)." >&2
+      say "       Una API key de cliente ya no alcanza para importar." >&2
     fi
     exit 1
   fi
@@ -177,6 +245,8 @@ import_connection() {
   fi
 
   say "==> Conexión creada: $connection_id"
+  rm -f "$ADMIN_HEADER_FILE"
+  ADMIN_HEADER_FILE=""
 }
 
 save_probe_audit() {
@@ -239,6 +309,7 @@ report_probe_usage() {
 }
 
 probe_router() {
+  load_client_token
   new_tmp_response
 
   say "==> Probando $WORKBUDDY_PROBE_MODEL a través de 9router-go..."
@@ -249,7 +320,7 @@ probe_router() {
       curl -sS --max-time 120 \
         -o "$TMP_RESPONSE" \
         -w '%{http_code}' \
-        -H "Authorization: Bearer $ROUTER_TOKEN" \
+        -H "@$CLIENT_HEADER_FILE" \
         -H 'Content-Type: application/json' \
         --data-binary @- \
         "$ROUTER_BASE_URL/chat/completions"
