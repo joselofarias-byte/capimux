@@ -1,6 +1,6 @@
 # CAPIMUX — Estado del trabajo de Grok Bot
 
-Última actualización: 2026-10-30, 13:40 (hora de Montevideo, UTC-3).
+Última actualización: 2026-10-31, 03:16 (hora de Montevideo, UTC-3).
 Repositorio: `joselofarias-byte/capimux` (público). Este informe no contiene secretos, tokens ni datos privados; todas las credenciales usadas en pruebas son sintéticas.
 
 ## 1. Objetivo del ciclo
@@ -562,6 +562,65 @@ Confirmado en GitHub: #158, #159, #160, #161 y #162 estaban mergeados (ciclo 10)
 - #131: solo agrega un documento de auditoría.
 - Con dependencia pendiente: #132 y #138, con base `feat/free-best-dynamic-routing` (452 commits detrás de main, en conflicto, y sus PR #14 y #111 cerrados). Hay que cambiarles la base a main antes de evaluarlos.
 - #134, #135 y #137 ya estaban cerrados.
+
+### Ciclo 13 — #164 (manifest firmado Ed25519, OPS-01) listo para revisión (31/10, 03:05–03:20 UTC-3)
+
+Pedido del dueño: dejar #164 (`release/signed-manifest-chain-20261030`) listo para su revisión, **sin** merge, tags, releases, generación de claves, secretos, force-push ni rebase.
+
+- **Base `main`:** `bdef47b54f1e761d828f3fe91dce1c60c3db0564`, sin avances desde la última actualización. La rama ya contenía `main`, así que no hizo falta un merge.
+- **Head verificado:** `60de720c7db77f04d3ce45d88e09778ce772a95d`. Este documento se agrega después en un commit solo de documentación; el código es idéntico.
+- **GitHub antes del commit:** `mergeable = MERGEABLE`, `mergeStateStatus = CLEAN`, sin borrador y sin revisiones pedidas. **Sin conflictos.**
+- **CI en `60de720c`:** test, Go race detector, Integration tests, Build Docker image (verify only) y Vercel en verde. El CI del commit de este documento se reporta aparte.
+
+Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` vacío; `web/dist` generado con `bun run build`, rc=0):
+
+| Comando | RC |
+|---|---|
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` (49 paquetes ok) | 0 |
+| `go test -race -count=1 ./...` (49 paquetes ok) | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=1 -v ./internal/updater/...` (46 tests de primer nivel PASS) | 0 |
+| `go test -count=1 -v ./cmd/release-manifest/...` | 0 |
+
+**Pruebas del PR (todas PASS en la corrida `-v`):**
+- **Los 8 casos de manipulación de `TestSignedReleaseRejectsTampering`:**
+  - hash del binario cambiado en el payload;
+  - un byte del payload alterado;
+  - vencimiento extendido después de firmar;
+  - firma alterada;
+  - firma de una clave no embebida;
+  - manifest vencido;
+  - vencimiento exacto al final de la validez;
+  - binario reemplazado en el servidor después de firmar.
+- **Pruebas del workflow:**
+  - `TestReleaseWorkflowPublishesSignedManifestWithBinaries`;
+  - `TestReleaseWorkflowPublishesEveryCrossTarget`;
+  - `TestReleaseWorkflowPublishesToOwnedGHCR`.
+- **Pruebas de claves y payload:**
+  - `TestEmbeddedManifestPublicKeysWellFormed`;
+  - `TestRepositoryShipsNoPlaceholderManifestKey`;
+  - `TestBuildSignedManifestPayloadRefusesUnsafeInput`.
+- **`cmd/release-manifest`:**
+  - `TestSignedOutWithoutSecretFailsExplicitly`;
+  - `TestSignedOutWithUnembeddedKeyFails`;
+  - `TestUnsignedManifestStillWritten`.
+- **Suite previa de OPS-01:**
+  - `TestSignedManifestRejectsTampering`, con 11 casos;
+  - pruebas de downgrade/replay, binario alterado y clave embebida malformada;
+  - camino sin firma intacto.
+
+**Lo que le falta al propietario.** Los agentes no generan ni almacenan la clave privada, ni tocan secretos:
+1. **Generar la clave Ed25519.** Debe hacerlo él mismo, fuera del repositorio; la privada queda bajo su control exclusivo. Ver `docs/RELEASE-CHECKLIST.es.md` y `docs/security/GROK-004-OPS-01.md`.
+2. **Cargar el secreto de Actions `CAPIMUX_MANIFEST_SIGNING_KEY`** en `joselofarias-byte/capimux`. Sin él, el job de release falla a propósito antes de compilar.
+3. **Embeber la clave pública** (solo la pública, base64 de 32 bytes, con su key ID) en `embeddedManifestPublicKeys` de `internal/updater/signed_manifest_trust.go`. El firmador verifica que la clave del secreto coincida con una clave embebida en ese mismo commit.
+4. **Decidir el merge de #164.** No hay autorización de merge para este PR.
+5. **Crear el primer tag `v*`** cuando los pasos 1–3 estén hechos. Ese tag dispara el primer release con `version.signed.json`.
+
+Este documento no contiene claves, secretos ni tokens.
 
 ## 7. Pruebas y verificación
 
