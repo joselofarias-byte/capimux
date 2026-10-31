@@ -108,7 +108,10 @@ func TestFreeBestFailoverMatrix(t *testing.T) {
 	}
 }
 
-func TestFreeBestPermanentRequestDoesNotBurnSiblingAccount(t *testing.T) {
+// Main's contract (#157) wins over the original design of this PR: a
+// permanent 4xx tries each account of the entry once (the spare is reached
+// exactly once, never retried), then the next model serves the request.
+func TestFreeBestPermanentRequestTriesEachAccountOnce(t *testing.T) {
 	var firstHits, spareHits, nextHits atomic.Int32
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firstHits.Add(1)
@@ -145,7 +148,7 @@ func TestFreeBestPermanentRequestDoesNotBurnSiblingAccount(t *testing.T) {
 	h.handleComboFallback(t.Context(), rec, []byte(`{"model":"free-best","messages":[{"role":"user","content":"hola"}]}`),
 		[]string{"groq/llama-3.1-8b-instant", "deepseek/deepseek-reasoner-free"},
 		"fallback", false, false, "free-best", 0, true)
-	if firstHits.Load() != 1 || spareHits.Load() != 0 || nextHits.Load() != 1 || rec.Code != http.StatusOK {
+	if firstHits.Load() != 1 || spareHits.Load() != 1 || nextHits.Load() != 1 || rec.Code != http.StatusOK {
 		t.Fatalf("400 rotation: first=%d spare=%d next=%d status=%d body=%s", firstHits.Load(), spareHits.Load(), nextHits.Load(), rec.Code, rec.Body.String())
 	}
 }

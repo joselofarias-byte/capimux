@@ -75,6 +75,13 @@ func (h *ChatHandler) finishComboAttempt(a comboAttempt) comboAttemptResult {
 	if decision == "stop" {
 		return comboAttemptResult{StopRequest: true, Upstream: ue}
 	}
+	if reason == "permanent_request" && ue != nil {
+		// Keep main's combo contract (#157): a permanent 4xx tries each
+		// account of this entry once before the next model. The account is
+		// not locked nor excluded for later entries; the combo loop already
+		// records it in triedThisEntry.
+		return comboAttemptResult{Upstream: ue}
+	}
 	if decision == "next_model" {
 		return comboAttemptResult{NextModel: true, Upstream: coalesceUpstream(ue)}
 	}

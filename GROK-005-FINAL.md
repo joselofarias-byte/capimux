@@ -51,7 +51,7 @@ Los PR de seguridad abiertos no se incorporaron. Siguen abiertos, en borrador y 
 | 500 | sí | si no quedan cuentas | no | igual |
 | 503 / 502 / 504 | sí | si no quedan cuentas | sí, gateway | igual |
 | 408, timeout de un salto, red | sí | si no quedan cuentas | no | igual |
-| 400 / 404 y otros 4xx no listados | no | sí, si hay otro elegible | no | error si nadie responde |
+| 400 / 404 y otros 4xx no listados | sí, cada cuenta una sola vez (contrato de main, #157) | sí, al agotar las cuentas | no, y la cuenta no queda excluida para otros modelos | error si nadie responde |
 | cuerpo 200 vacío | no en el mismo modelo del combo | sí | no (lock corto solo de ese modelo) | no se entrega el vacío |
 | bytes ya enviados al cliente | no | no | no | se conserva lo ya enviado |
 | cancelación del caller | no | no | no | se aborta |
