@@ -242,6 +242,13 @@ func TestPromptInjectionAdminOnlyForClientKeys(t *testing.T) {
 			if kv, _ := env.Repo.GetKVScope("promptInjection"); len(kv) != 0 {
 				t.Errorf("la API key escribió capas: %v", kv)
 			}
+			if !requireLogin {
+				// Compatibility: a full-form save that re-sends the unchanged
+				// (default off) switch keeps working with the key.
+				if res := env.Do(t, http.MethodPatch, "/api/settings", map[string]any{"language": "es", "promptInjectionEnabled": false}); res.Status != http.StatusOK {
+					t.Errorf("guardado sin cambios con API key = %d %s", res.Status, truncate(res.Body))
+				}
+			}
 			// The owner (session) and the local CLI token are allowed.
 			if res := env.Get(t, "/api/prompt-injections", operator(t)...); res.Status != http.StatusOK {
 				t.Errorf("sesión admin = %d", res.Status)

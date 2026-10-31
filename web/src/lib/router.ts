@@ -21,6 +21,8 @@ export type ActiveTab =
   | 'terminal'
   | 'settings'
   | 'keys'
+  | 'prompt-injection'
+  | 'playground'
 
 export const TAB_ROUTES: Record<ActiveTab, string> = {
   login: '/login',
@@ -45,6 +47,8 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   terminal: '/dashboard/console-log',
   settings: '/dashboard/profile',
   keys: '/dashboard/cli-tools',
+  'prompt-injection': '/dashboard/prompt-injection',
+  playground: '/dashboard/playground',
 }
 
 const ROUTE_TO_TAB: Record<string, ActiveTab> = {
@@ -69,6 +73,10 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
 
   '/dashboard/multiagent': 'multiagent',
   '/multiagent': 'multiagent',
+
+  // prompt injection & playground
+  '/dashboard/prompt-injection': 'prompt-injection',
+  '/dashboard/playground': 'playground',
 
   // usage / analytics
   '/dashboard/usage': 'analytics',

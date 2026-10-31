@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 	json "encoding/json/v2"
@@ -80,9 +81,19 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 
 	// Prompt-injection switches are never writable with a client API key,
 	// whatever requireLogin says.
+	// Re-sending an unchanged value (full-form saves) is not a change.
 	if !isAdminRequest(r) && middleware.ExtractApiKey(r) != "" {
+		current, _ := h.Repo.GetSettingsRaw()
 		for _, k := range strictAdminSettingKeys {
-			if _, ok := updates[k]; ok {
+			next, ok := updates[k]
+			if !ok {
+				continue
+			}
+			prev, had := current[k]
+			if !had {
+				prev = false
+			}
+			if !reflect.DeepEqual(prev, next) {
 				writePlainError(w, http.StatusForbidden, adminRequiredMessage("modificar el ajuste "+k))
 				return
 			}
