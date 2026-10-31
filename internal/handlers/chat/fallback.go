@@ -551,6 +551,8 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		DurationMs: latencyMs,
 		TTFTMs:     metrics.TTFT,
 	})
+	// Provider/model health for the opt-in "health" combo strategy.
+	recordComboHealth(ctx, provider, model, completed, fwdErr, latencyMs)
 
 	usage := translator.GetAndClearUsage(ctx)
 	if completed {

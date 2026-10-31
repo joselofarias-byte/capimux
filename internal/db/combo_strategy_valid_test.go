@@ -3,7 +3,7 @@ package db
 import "testing"
 
 func TestIsValidComboStrategy(t *testing.T) {
-	for _, ok := range []string{"fallback", "first-model", "round-robin", "roundrobin", "sticky", "capacity", "fusion"} {
+	for _, ok := range []string{"fallback", "first-model", "round-robin", "roundrobin", "sticky", "capacity", "fusion", "health"} {
 		if !IsValidComboStrategy(ok) {
 			t.Errorf("IsValidComboStrategy(%q) = false, want true", ok)
 		}
