@@ -10,6 +10,7 @@ import (
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlers/sso"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/internal/multiagent"
 	"9router/proxy/web"
@@ -147,6 +148,8 @@ func SetupRoutes(r interface {
 func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
 	dashH := dashboard.NewDashboardHandler(repo)
 	ssoH := sso.NewHandler(repo)
+	// Per-key quotas admin API: admin only.
+	setupKeyQuotaRoutes(r, repo)
 
 	// Multiagent calls share the dashboard authentication guard.
 	r.Get("/api/multiagent/policy", multiagent.PolicyHandler)
@@ -442,6 +445,13 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// API-key protected domain routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireApiKey(repo))
+		// Per-key RPM/TPM/concurrency/token quotas (off by default).
+		r.Use(keyquota.Middleware(repo, func(r *http.Request) string {
+			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
+				return k.ID
+			}
+			return ""
+		}))
 		SetupRoutes(r, repo, ts)
 	})
 
