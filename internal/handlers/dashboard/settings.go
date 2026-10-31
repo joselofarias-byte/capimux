@@ -19,6 +19,7 @@ import (
 	"9router/proxy/internal/auth"
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/middleware"
 )
 
 // Dashboard client headers, matching the Next dashboard settings/database route.
@@ -75,6 +76,17 @@ func (h *DashboardHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.R
 	}
 	if updates == nil {
 		updates = map[string]any{}
+	}
+
+	// Prompt-injection switches are never writable with a client API key,
+	// whatever requireLogin says.
+	if !isAdminRequest(r) && middleware.ExtractApiKey(r) != "" {
+		for _, k := range strictAdminSettingKeys {
+			if _, ok := updates[k]; ok {
+				writePlainError(w, http.StatusForbidden, adminRequiredMessage("modificar el ajuste "+k))
+				return
+			}
+		}
 	}
 
 	// A client API key may pass the dashboard guard, but it must not be able to

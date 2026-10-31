@@ -19,6 +19,7 @@ import (
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/promptinject"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/tokensaver"
@@ -583,7 +584,12 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			APIKey:       apiKey,
 			Endpoint:     endpoint,
 		}
-		h.logUsage(logInfo, usage, latencyMs, body, metrics)
+		if usage.PromptTokens == 0 && promptinject.Injected(ctx) && len(body) > 0 {
+			// Estimate from the body really sent (with the injected
+			// instructions) before the log copy is scrubbed.
+			usage.PromptTokens = max(CountValueChars(body)/4, 1)
+		}
+		h.logUsage(logInfo, usage, latencyMs, promptinject.ScrubForLog(ctx, body), metrics)
 		fwdErr = nil
 		return nil
 	}
@@ -605,7 +611,7 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		usage,
 		fwdErr,
 		latencyMs,
-		body,
+		promptinject.ScrubForLog(ctx, body),
 		metrics,
 	)
 	if isClientCanceled(ctx, fwdErr) {
