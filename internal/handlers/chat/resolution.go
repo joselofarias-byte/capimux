@@ -12,6 +12,7 @@ import (
 	"9router/proxy/internal/controlplane/registry"
 	"9router/proxy/internal/controlplane/routing"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/deepseekprofile"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
@@ -85,6 +86,7 @@ func NewChatHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *ChatHandler 
 		},
 		TokenSaver:  cfg,
 		stickyState: make(map[string]*comboStickyState),
+		deepseek:    loadDeepSeekProfile(deepseekprofile.OSEnv()),
 	}
 }
 
@@ -230,13 +232,18 @@ const (
 // continuity route: today it is guaranteed to contain the same fail-closed
 // free/no-auth coding pool as coding-best-free; quota-backed premium candidates
 // can be layered ahead of it without ever removing this floor.
+func virtualFreeModelIDs() []string {
+	return []string{"free", "free-best", "fast-free", "reasoning-free", "coding-best-free", "coding-auto", "long-context-free"}
+}
+
 func isVirtualFreeRoute(modelStr string) bool {
-	switch canonicalVirtualName(modelStr) {
-	case "free", "free-best", "fast-free", "reasoning-free", "coding-best-free", "coding-auto", "long-context-free":
-		return true
-	default:
-		return false
+	canonical := canonicalVirtualName(modelStr)
+	for _, id := range virtualFreeModelIDs() {
+		if canonical == id {
+			return true
+		}
 	}
+	return false
 }
 
 func canonicalVirtualName(modelStr string) string {
