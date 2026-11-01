@@ -660,6 +660,60 @@ Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` va
 
 Este documento no contiene claves, secretos ni tokens.
 
+### Revisión de #141 — DB-02, cifrado AES-GCM por campo (31/10, 21:30 UTC-3) — sigue en BORRADOR
+
+- **Rama:** `security/grok-004-db02-encryption-design`. Se mergeó `main` `3e1e05b2` sin conflictos y quedó el merge commit `f3017568`. Después agregué un commit solo de tests, `e1ea883f`.
+- **Etapa implementada (etapa 0, primitiva aislada):**
+  - AES-256-GCM con nonce aleatorio por valor y un envelope versionado `capimux:enc:v1:`.
+  - AAD ligado a tabla, fila y columna.
+  - Subclaves HMAC-SHA256 separadas por propósito (cifrado y lookup).
+  - `apiKeyLookupHMAC` para buscar API keys por igualdad.
+  - **Nada de esto está conectado** a ninguna escritura o lectura real. El doc lo dice explícitamente.
+- **Lo que falta para la etapa 1** (cifrar de verdad y migrar):
+  - el inventario completo de campos con secretos;
+  - el proveedor de clave externo;
+  - leer filas legadas en texto plano durante la transición;
+  - la columna `keyLookupHMAC` y el cambio de lookup en `repos.go`;
+  - cifrar y descifrar en el borde del repositorio;
+  - la migración con backup verificado previo, journal y etapa idempotente y reanudable, sin mezclar filas cifradas y planas;
+  - la rotación con recifrado transaccional;
+  - el compactado de WAL y snapshots;
+  - las pruebas de restore y de Termux/APK.
+- **Riesgos de migración:**
+  - Si se pierde la clave única, se pierden las credenciales.
+  - Un `UPDATE` no borra el texto plano viejo de WAL ni de las páginas libres.
+  - Con escritores activos, una migración a medias puede mezclar filas cifradas y planas.
+  - El lookup actual por igualdad deja de funcionar con ciphertext.
+  - Hoy, `decryptDBField` rechaza las filas legadas sin cifrar: falla cerrado, y hará falta un modo de transición explícito.
+- **Revisado y correcto en la primitiva:**
+  - Nonce único (`crypto/rand`).
+  - AAD por fila y campo.
+  - Si falta la clave, es incorrecta o el ciphertext está alterado, falla cerrado sin escribir nada.
+  - La clave no está hardcodeada: se recibe como parámetro de 32 bytes y no se loguea.
+  - Termux sigue con `modernc.org/sqlite` (Go puro). `mattn` solo entra con `capimux_apk && cgo`, y el PR no cambia drivers.
+- **Tests agregados** (`internal/db/field_crypto_tamper_test.go`):
+  - `TestGROK004DBFieldBitFlipFailsAuthentication`: un bit cambiado en cada byte del nonce, el ciphertext o el tag da error de autenticación. También rechaza el ciphertext truncado, el envelope `v2` desconocido y una clave rotada; la clave original sigue abriendo el valor.
+  - `TestGROK004DBFieldNonceUniqueness`: 2000 cifrados sin repetir nonce.
+  - El test de migración interrumpida **no se puede escribir todavía**, porque la migración no existe.
+- **Batería** (worktree limpio en `e1ea883f`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | **1**: solo `internal/entitlements` `TestProviders` (bomba de fecha, ver abajo); los otros 49 paquetes ok |
+| `go test -race -count=1 ./...` | **1**: el mismo fallo; los otros 49 paquetes ok |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| Termux `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` y `./cmd/9router-go` | 0 |
+| `go test -count=10 -v -run GROK004 ./internal/db/` (6 tests) | 0 (60 de 60 pasan) |
+| `go test -race -count=10 -run GROK004 ./internal/db/` | 0 |
+
+- **Bloqueo ajeno al PR:** `TestProviders` tiene fijo `ExpiresAt` = 2026-11-01 00:00 UTC. Desde el 31/10 a las 21:00 hora de Montevideo falla en `main` y en todos los PRs; acá falló dos veces por el mismo error. El arreglo está en el PR borrador separado #173.
+- **Decisiones del propietario pendientes:** dónde vive la clave (Android Keystore, archivo 0600 en Termux o secret store), el escrow y la recuperación, y cuándo activar la migración.
+- **Estado:** **borrador**. La etapa 1 no está implementada y el CI está en rojo por el bloqueo de #173.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
