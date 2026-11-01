@@ -728,6 +728,35 @@ configuración, reglas y reversión: `docs/PERFIL_DEEPSEEK.es.md`.
   - InferX: 6 respuestas 200, ~14,03 s.
   - Auditoría DSH: 3 pruebas OK, incluidas las herramientas autorizadas y `tool_choice` none.
 
+### Cierre de verificación de #143 — estadísticas por solicitud (31/10, 18:25 UTC-3)
+
+- **Rama:** `feat/request-statistics-20261022`. Se mergeó `main` `3e1e05b2`.
+- **Conflicto:** solo en `internal/handlers/chat/usage.go` (`logUsage`). Quedaron combinadas las dos partes: el `uuid` de la rama para el ID del request, el filtro de privacidad de #139 (prompts y respuestas solo con `CAPIMUX_CAPTURE_REQUEST_CONTENT=true`) y los campos nuevos `cost`, `costEstimated`, `tokensEstimated` y `endpoint`.
+- **Test nuevo:** `TestRequestStatisticsDoNotPersistContentOrCredentials`. Con la captura apagada, el registro conserva costo, endpoint y cuenta, pero no guarda ni el texto del prompt ni la API key.
+- **Coherencia:**
+  - El costo sale de la tabla local `internal/pricing`, sin llamadas de red. Si la tarifa es desconocida queda `null`, no 0.
+  - La cuenta es el `connectionId` o el nombre que ya tiene la lista de conexiones del dashboard, sin credenciales.
+  - El endpoint es una ruta fija del servidor, sin query string.
+  - El porcentaje de caché y la velocidad descartan valores inválidos (los cubren los tests web).
+  - Los detalles siguen siendo solo para admin.
+- **Batería** (worktree limpio en `c15a77c3`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `bun test` (135 pasan, 0 fallan) | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10 -v` de las estadísticas y los detalles de requests (10 tests) | 0 (100 de 100 pasan) |
+| `go test -tags=integration -count=10 -v` de `TestDashboardRequestStatistics` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **Estado:** no está mergeado. Pasa a revisión si el CI queda en verde.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
