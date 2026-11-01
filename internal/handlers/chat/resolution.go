@@ -12,6 +12,7 @@ import (
 	"9router/proxy/internal/controlplane/registry"
 	"9router/proxy/internal/controlplane/routing"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/deepseekprofile"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
@@ -85,6 +86,7 @@ func NewChatHandler(repo *db.Repo, ts ...*shared.TokenSaverConfig) *ChatHandler 
 		},
 		TokenSaver:  cfg,
 		stickyState: make(map[string]*comboStickyState),
+		deepseek:    loadDeepSeekProfile(deepseekprofile.OSEnv()),
 	}
 }
 
