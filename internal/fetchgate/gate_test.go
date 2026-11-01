@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -23,8 +24,25 @@ func TestGateAcquire_IdleGateReturnsImmediately(t *testing.T) {
 	}
 }
 
+// timerGranularity is the only slack the wall-clock tests allow. The gate
+// computes every slot exactly (slot k opens k floors after the first), Go
+// timers never fire before their duration on the monotonic clock, and every
+// measurement below is taken from an origin recorded before the first
+// reservation. Scheduler delay can only make a measured instant later, so no
+// percentage tolerance is needed; the millisecond only covers platforms with a
+// coarse timer clock.
+const timerGranularity = time.Millisecond
+
 // The whole point of the gate: N simultaneous callers must not start in the
 // same millisecond. This is the ten-accounts-on-one-IP case from issue #30.
+//
+// Measuring the gap between two neighbours' return times was flaky: one
+// goroutine descheduled after its grant shrinks the next measured gap even
+// though the gate spaced the grants correctly (observed 35.5ms for a 40ms
+// floor). Measured from one origin, the k-th caller to get through can never
+// do so before k floors have passed, whatever the scheduler does: that is the
+// k-th order statistic of slots that are each at least k floors apart. A burst
+// fails it at k=1.
 func TestGateAcquire_SpacesConcurrentCallers(t *testing.T) {
 	const (
 		callers = 8
@@ -57,31 +75,58 @@ func TestGateAcquire_SpacesConcurrentCallers(t *testing.T) {
 		t.Fatalf("got %d slots, want %d", len(slots), callers)
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
-	// Each timestamp is taken after Acquire returns, so scheduler delay on one
-	// goroutine (worse under -race or a loaded CI runner) shifts it later and
-	// shrinks the next measured gap even though the gate spaced the grants
-	// correctly (observed: 35.5ms for a 40ms floor). Per gap, only require
-	// clearly-paced starts (catches the "same millisecond" regression); the
-	// overall span, which measurement noise cannot shrink, carries the 90%
-	// floor guarantee.
-	for i := 1; i < len(slots); i++ {
-		// Sorted by start time, so consecutive entries are consecutive grants.
-		if gap := slots[i] - slots[i-1]; gap < minGap/2 {
-			t.Errorf("caller %d started %s after the previous one, want >= %s", i, gap, minGap)
+	for k, got := range slots {
+		if want := time.Duration(k)*minGap - timerGranularity; got < want {
+			t.Errorf("caller #%d got through %s after the burst started, want >= %s (%d floors of %s)", k, got, want+timerGranularity, k, minGap)
 		}
-	}
-	if span, want := slots[len(slots)-1]-slots[0], time.Duration(callers-1)*minGap*9/10; span < want {
-		t.Errorf("%d callers spanned %s, want >= %s", callers, span, want)
 	}
 }
 
-// Jitter must only ever add delay: the floor stays the hard guarantee.
-// Slots are scheduled from the previous slot's start, not from when the
-// previous Acquire returned, so measuring each wait from the previous return
-// under-reports it whenever that goroutine was descheduled (observed: 22ms for
-// a 30ms floor on a loaded runner). Measuring every grant from one origin is
-// immune to that: lateness only adds time. A wall-clock timer can still fire a
-// sliver early, hence the same 90% tolerance as the spacing test.
+// The same property on a fake clock (testing/synctest): with the scheduler and
+// the timers out of the picture, the grants must be exactly one floor apart.
+// This is the deterministic version; any drift in the gate's arithmetic fails
+// it without tolerance.
+func TestGateAcquire_SpacesConcurrentCallers_FakeClock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			callers = 8
+			minGap  = 40 * time.Millisecond
+		)
+		g := New(minGap, 0)
+		var (
+			mu    sync.Mutex
+			slots []time.Duration
+			wg    sync.WaitGroup
+		)
+		start := time.Now()
+		for range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := g.Acquire(t.Context()); err != nil {
+					t.Errorf("Acquire: %v", err)
+					return
+				}
+				mu.Lock()
+				slots = append(slots, time.Since(start))
+				mu.Unlock()
+			}()
+		}
+		wg.Wait()
+		sort.Slice(slots, func(i, j int) bool { return slots[i] < slots[j] })
+		for k, got := range slots {
+			if want := time.Duration(k) * minGap; got != want {
+				t.Errorf("caller #%d got through at %s, want exactly %s", k, got, want)
+			}
+		}
+	})
+}
+
+// Jitter must only ever add delay: the floor stays the hard guarantee. Every
+// grant is measured from one origin taken before the first Acquire, so a
+// descheduled goroutine can only make a slot look later, never earlier
+// (measuring from the previous return under-reported it: 22ms for a 30ms
+// floor on a loaded runner).
 func TestGateAcquire_JitterOnlyWidensTheGap(t *testing.T) {
 	const floor = 30 * time.Millisecond
 	g := New(floor, floor)
@@ -94,10 +139,42 @@ func TestGateAcquire_JitterOnlyWidensTheGap(t *testing.T) {
 		if err := g.Acquire(t.Context()); err != nil {
 			t.Fatalf("Acquire %d: %v", i, err)
 		}
-		if elapsed, want := time.Since(origin), time.Duration(i+1)*floor*9/10; elapsed < want {
-			t.Fatalf("slot %d opened %s after the first, want at least %s (90%% of %d x %s floor)", i, elapsed, want, i+1, floor)
+		if elapsed, want := time.Since(origin), time.Duration(i+1)*floor-timerGranularity; elapsed < want {
+			t.Fatalf("slot %d opened %s after the first, want at least %s (%d x %s floor)", i, elapsed, want+timerGranularity, i+1, floor)
 		}
 	}
+}
+
+// On a fake clock every gap is observable exactly: it must sit inside
+// [floor, floor+maxJitter], and the jitter must actually vary (a gate that
+// silently dropped it would pass the wall-clock test).
+func TestGateAcquire_JitterOnlyWidensTheGap_FakeClock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const floor, jitter = 30 * time.Millisecond, 30 * time.Millisecond
+		g := New(floor, jitter)
+		if err := g.Acquire(t.Context()); err != nil {
+			t.Fatalf("first Acquire: %v", err)
+		}
+		prev := time.Now()
+		widened := 0
+		for i := range 50 {
+			if err := g.Acquire(t.Context()); err != nil {
+				t.Fatalf("Acquire %d: %v", i, err)
+			}
+			now := time.Now()
+			gap := now.Sub(prev)
+			prev = now
+			if gap < floor || gap > floor+jitter {
+				t.Fatalf("gap %d = %s, want within [%s, %s]", i, gap, floor, floor+jitter)
+			}
+			if gap > floor {
+				widened++
+			}
+		}
+		if widened == 0 {
+			t.Fatal("jitter never widened a gap in 50 slots")
+		}
+	})
 }
 
 // A dashboard that navigates away mid-wait must not hold a slot against the
