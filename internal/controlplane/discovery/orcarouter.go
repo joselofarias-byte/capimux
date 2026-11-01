@@ -36,6 +36,11 @@ func (a *OrcaRouterAdapter) SourceID() string {
 	return "orcarouter"
 }
 
+// ScopedProviderIDs returns the provider whose catalog this adapter owns.
+func (a *OrcaRouterAdapter) ScopedProviderIDs() []string {
+	return []string{"orcarouter"}
+}
+
 func (a *OrcaRouterAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 	// Fallback mechanism to robustly support generic OpenAI-compatible structures
 	// if specific OrcaRouter endpoints fail.
@@ -119,22 +124,17 @@ func (a *OrcaRouterAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 		modelID := mData.ID
 		pricingMode := "paid"
 
-		// Cost is authoritative for free-only safety. A positive advertised cost
-		// must never be overridden by endpoint or model-name heuristics.
-		hasPositiveCost := mData.Cost != nil && (mData.Cost.Prompt > 0 || mData.Cost.Completion > 0)
-		switch {
-		case hasPositiveCost:
-			pricingMode = "paid"
-		case mData.Pricing.Mode == "paid":
-			pricingMode = "paid"
-		case mData.Pricing.Mode != "":
+		// Infer free tier from endpoint heuristics or cost metrics if available
+		if mData.Pricing.Mode != "" && mData.Pricing.Mode != "paid" {
 			pricingMode = mData.Pricing.Mode
-		case mData.Cost != nil && mData.Cost.Prompt == 0 && mData.Cost.Completion == 0:
+		} else if mData.Pricing.Mode == "paid" {
+			pricingMode = "paid"
+		} else if isFreeEndpoint {
 			pricingMode = "free_tier"
-		case isFreeEndpoint:
+		} else if mData.Cost != nil && mData.Cost.Prompt == 0 && mData.Cost.Completion == 0 {
 			pricingMode = "free_tier"
-		case strings.Contains(strings.ToLower(modelID), "free") || strings.Contains(strings.ToLower(modelID), "glm-5.3"):
-			// Heuristics are a last resort when the catalog provides no pricing evidence.
+		} else if strings.Contains(strings.ToLower(modelID), "free") || strings.Contains(strings.ToLower(modelID), "glm-5.3") {
+			// Specific free-tier lineup detection, including GLM 5.3 Flash.
 			pricingMode = "free_tier"
 		}
 

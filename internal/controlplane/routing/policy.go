@@ -19,6 +19,27 @@ const (
 	PolicyTrusted   Policy = "trusted-only"
 )
 
+const virtualNoAuthAccountPrefix = "noauth:"
+
+// VirtualNoAuthAccountID gives credential-free providers a stable routing
+// identity for scoring without creating a fake database credential row.
+func VirtualNoAuthAccountID(providerID string) string {
+	return virtualNoAuthAccountPrefix + providerID
+}
+
+// IsVirtualNoAuthAccount validates the synthetic identity used only by
+// KnownProviders entries explicitly marked NoAuth.
+func IsVirtualNoAuthAccount(providerID, accountID string) bool {
+	return providerID != "" && accountID == VirtualNoAuthAccountID(providerID)
+}
+
+// IsFreePricing reports whether Fabric currently classifies a model as free.
+// The comparison is exact: discovery writes "free" and "free_tier", and any
+// other spelling stays out of the free pool.
+func IsFreePricing(mode string) bool {
+	return mode == "free" || mode == "free_tier"
+}
+
 type RouteNode struct {
 	ProviderID    string
 	ModelID       string
@@ -34,8 +55,8 @@ type Engine struct {
 
 // SelectCandidates evaluates a requested model/pool against the active registry snapshot,
 // applying the specified routing policy, and returns a sorted list of fallback candidate nodes.
-// An empty requestedModel means "all models allowed by policy". This is used by virtual
-// routes such as free-best, where the policy itself defines the candidate pool.
+// An empty requestedModel selects every active model the policy allows. Virtual routes
+// such as free and free-best use that form to build a dynamic pool.
 func (e *Engine) SelectCandidates(requestedModel string, policy Policy) []RouteNode {
 	state := registry.GetActiveState()
 	if state == nil {
@@ -43,14 +64,25 @@ func (e *Engine) SelectCandidates(requestedModel string, policy Policy) []RouteN
 	}
 
 	var candidates []RouteNode
+
+	// In a complete implementation, this would look up the routing pool definition
+	// and expand requestedModel to all candidate models in the pool.
+	// For now, we do a direct lookup of all ProviderModels matching the requested ID.
 	for provID, providerModels := range state.ProviderModels {
+		// Filter out inactive or missing providers entirely
 		p, ok := state.Providers[provID]
 		if !ok || p == nil || !p.IsActive {
 			continue
 		}
 
 		for _, pm := range providerModels {
-			if pm == nil || !pm.IsActive {
+			// Defensively skip nil entries
+			if pm == nil {
+				continue
+			}
+
+			// Filter out inactive models
+			if !pm.IsActive {
 				continue
 			}
 
@@ -59,36 +91,37 @@ func (e *Engine) SelectCandidates(requestedModel string, policy Policy) []RouteN
 				continue
 			}
 
-			isFree := pm.PricingMode == "free" || pm.PricingMode == "free_tier"
+			// Enforce Policy constraints. Only the exact Fabric classifications
+			// "free" and "free_tier" count. "FREE", "free ", "trial", empty,
+			// paid, and unknown are not eligible for a free-only pool.
+			isFree := IsFreePricing(pm.PricingMode)
 			if policy == PolicyFreeOnly && !isFree {
-				continue
+				continue // strict drop
 			}
 
 			riskProfile := providers.GetProviderRiskProfile(provID)
-			for _, acc := range state.Accounts {
-				if acc == nil || acc.ProviderID != provID || !acc.IsActive {
-					continue
-				}
 
-				trustLvl := e.TrustManager.GetTrustLevel(provID, pm.ModelID, acc.ID)
+			appendCandidate := func(accountID string) {
+				trustLvl := e.TrustManager.GetTrustLevel(provID, pm.ModelID, accountID)
+
 				if policy == PolicyTrusted && trustLvl != trust.TrustTrusted && trustLvl != trust.TrustVerified {
-					continue
+					return
 				}
 
-				stats := e.TrustManager.GetStats(provID, pm.ModelID, acc.ID)
 				factors := scoring.Factors{
 					TrustLevel:         trustLvl,
-					LatencyMs:          stats.LatencyMs,
-					TTFTMs:             stats.TTFTMs,
-					SuccessRate:        stats.SuccessRate,
 					IsFreeTier:         isFree,
 					AccountRiskPenalty: riskProfile.ScorePenalty,
+					// TTFT, Latency, etc., would be pulled from a metrics store
 				}
 
 				score := scoring.Calculate(factors)
 				if !score.IsRoutable {
-					continue
+					return
 				}
+
+				// If FreeFirst, strongly boost free models so they float to the top.
+				// Account-risk penalties still order peers within the free tier.
 				if policy == PolicyFreeFirst && isFree {
 					score.Total += 1000.0
 				}
@@ -97,16 +130,36 @@ func (e *Engine) SelectCandidates(requestedModel string, policy Policy) []RouteN
 					ProviderID:    provID,
 					ModelID:       pm.ModelID,
 					UpstreamModel: pm.UpstreamModel,
-					AccountID:     acc.ID,
+					AccountID:     accountID,
 					Score:         score,
 				})
+			}
+
+			hasActiveAccount := false
+			for _, acc := range state.Accounts {
+				if acc == nil || acc.ProviderID != provID || !acc.IsActive {
+					continue
+				}
+				hasActiveAccount = true
+				appendCandidate(acc.ID)
+			}
+
+			// Credential-free providers such as local llama.cpp are routable
+			// without inventing a providerConnections row.
+			if !hasActiveAccount {
+				if cfg, known := providers.KnownProviders[provID]; known && cfg.NoAuth {
+					appendCandidate(VirtualNoAuthAccountID(provID))
+				}
 			}
 		}
 	}
 
+	// Pre-shuffle to distribute load among equally scored nodes
 	rand.Shuffle(len(candidates), func(i, j int) {
 		candidates[i], candidates[j] = candidates[j], candidates[i]
 	})
+
+	// Sort candidates by score descending (stable due to preceding shuffle)
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Score.Total > candidates[j].Score.Total
 	})

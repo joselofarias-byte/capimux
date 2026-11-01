@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,9 +10,10 @@ import (
 	"io"
 	mathRand "math/rand"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
@@ -91,11 +93,23 @@ func (h *OAuthHandler) HandleOAuthImport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	priority, err := h.clientKeyImportPriority(r, provider)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	now := currentTimestamp()
-	_, err = h.Repo.RawDB().Exec(
-		`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, 1, ?, ?, ?)`,
-		connID, provider, connName, string(data), now, now,
-	)
+	if priority == nil {
+		_, err = h.Repo.RawDB().Exec(
+			`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, 1, ?, ?, ?)`,
+			connID, provider, connName, string(data), now, now,
+		)
+	} else {
+		_, err = h.Repo.RawDB().Exec(
+			`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', ?, ?, 1, ?, ?, ?)`,
+			connID, provider, connName, priority, string(data), now, now,
+		)
+	}
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, fmt.Sprintf("save connection: %v", err))
 		return
@@ -111,6 +125,9 @@ func (h *OAuthHandler) HandleOAuthImport(w http.ResponseWriter, r *http.Request)
 
 // HandleOAuthKiroSocialAuthorize generates Kiro social auth URL with PKCE.
 // GET /api/oauth/kiro/social-authorize?provider=google|github
+// Upstream parity (KiroService.buildSocialLoginUrl): the desktop auth service
+// (prod.us-east-1.auth.desktop.kiro.dev/login), NOT the Cognito hosted UI —
+// Cognito only whitelists the kiro:// protocol and rejects localhost.
 func (h *OAuthHandler) HandleOAuthKiroSocialAuthorize(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Query().Get("provider")
 	if p != "google" && p != "github" {
@@ -123,12 +140,14 @@ func (h *OAuthHandler) HandleOAuthKiroSocialAuthorize(w http.ResponseWriter, r *
 	codeChallenge := sha256Base64(codeVerifier)
 	state := randomString(32)
 
-	// Build Kiro social auth URL (AWS Cognito hosted UI)
-	clientID := "38k1nvcot3m5po4oi5f1jt0s46" // Kiro's Cognito client ID
-	redirectURI := "kiro://oauth"
+	idp := "Google"
+	if p == "github" {
+		idp = "Github"
+	}
+	redirectURI := "kiro://kiro.kiroAgent/authenticate-success"
 	authURL := fmt.Sprintf(
-		"https://kiro-auth-pool.auth.us-east-1.amazoncognito.com/oauth2/authorize?identity_provider=%s&response_type=code&client_id=%s&redirect_uri=%s&scope=openid+email+profile&state=%s&code_challenge_method=S256&code_challenge=%s",
-		titleProvider(p), clientID, redirectURI, state, codeChallenge,
+		"https://prod.us-east-1.auth.desktop.kiro.dev/login?idp=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256&state=%s&prompt=select_account",
+		idp, url.QueryEscape(redirectURI), codeChallenge, state,
 	)
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
@@ -140,8 +159,15 @@ func (h *OAuthHandler) HandleOAuthKiroSocialAuthorize(w http.ResponseWriter, r *
 	})
 }
 
+// kiroSocialTokenURL is the Kiro desktop auth token endpoint (a variable so
+// tests can point it at a local server).
+var kiroSocialTokenURL = "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token"
+
 // HandleOAuthKiroSocialExchange exchanges auth code for Kiro tokens.
 // POST /api/oauth/kiro/social-exchange
+// Upstream parity (KiroService.exchangeSocialCode): the desktop auth service
+// /oauth/token (JSON contract), not the Cognito form endpoint. The redirect
+// URI must match the authorize step or the exchange is rejected.
 func (h *OAuthHandler) HandleOAuthKiroSocialExchange(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -153,64 +179,103 @@ func (h *OAuthHandler) HandleOAuthKiroSocialExchange(w http.ResponseWriter, r *h
 	var req struct {
 		Code         string `json:"code"`
 		CodeVerifier string `json:"codeVerifier"`
+		Provider     string `json:"provider"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Code == "" {
-		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing code")
+	if req.Code == "" || req.CodeVerifier == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing code or codeVerifier")
+		return
+	}
+	if req.Provider != "" && req.Provider != "google" && req.Provider != "github" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid provider, use 'google' or 'github'")
 		return
 	}
 
-	// Exchange code for tokens via Cognito token endpoint
-	tokenURL := "https://kiro-auth-pool.auth.us-east-1.amazoncognito.com/oauth2/token"
-	exchangeBody := fmt.Sprintf(
-		"grant_type=authorization_code&client_id=%s&code=%s&redirect_uri=kiro://oauth&code_verifier=%s",
-		"38k1nvcot3m5po4oi5f1jt0s46", req.Code, req.CodeVerifier,
-	)
-
-	tokenResp, err := http.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(exchangeBody))
+	exchangePayload, err := json.Marshal(map[string]string{
+		"code":          req.Code,
+		"code_verifier": req.CodeVerifier,
+		"redirect_uri":  "kiro://kiro.kiroAgent/authenticate-success",
+	})
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to encode exchange request")
+		return
+	}
+	// Bound the exchange: http.Post used the default client (no timeout) and
+	// ignored the request context, so a stalled auth host kept this handler
+	// and its goroutine alive forever even after the browser gave up.
+	exchangeReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, kiroSocialTokenURL, bytes.NewReader(exchangePayload))
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to build exchange request")
+		return
+	}
+	exchangeReq.Header.Set("Content-Type", "application/json")
+	tokenResp, err := deviceClient.Do(exchangeReq)
 	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange failed: %v", err))
 		return
 	}
 	defer tokenResp.Body.Close()
 
-	var tokenData map[string]any
-	if err := json.UnmarshalRead(tokenResp.Body, &tokenData); err != nil {
-		log.Error("oauth", "decode token response failed", "error", err)
+	var tokenData struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresIn    int    `json:"expiresIn"`
+		ProfileArn   string `json:"profileArn"`
+	}
+	rawBody, err := io.ReadAll(io.LimitReader(tokenResp.Body, 1<<20))
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to read token response")
+		return
+	}
+	if tokenResp.StatusCode != http.StatusOK {
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, fmt.Sprintf("token exchange returned %d: %s", tokenResp.StatusCode, truncateForError(rawBody)))
+		return
+	}
+	if err := json.Unmarshal(rawBody, &tokenData); err != nil || tokenData.AccessToken == "" {
+		log.Error("oauth", "decode kiro social token response failed", "error", err)
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to decode token response")
 		return
 	}
-	if accessToken, ok := tokenData["access_token"].(string); ok {
-		// Save as kiro provider connection
-		connID := "kiro-oauth-" + randomString(12)
-		dataMap := map[string]any{
-			"accessToken": accessToken,
+
+	// Save as kiro provider connection (upstream social-exchange parity).
+	connID := "kiro-oauth-" + randomString(12)
+	expiresIn := tokenData.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 3600
+	}
+	dataMap := map[string]any{
+		"accessToken":  tokenData.AccessToken,
+		"refreshToken": tokenData.RefreshToken,
+		"expiresAt":    time.Now().Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339),
+		"providerSpecificData": map[string]any{
+			"profileArn": tokenData.ProfileArn,
+			"authMethod": req.Provider,
+			"provider":   titleProvider(req.Provider),
+		},
+	}
+	data, err := json.Marshal(dataMap)
+	if err != nil {
+		log.Error("oauth", "marshal Kiro social data failed", "error", err)
+	} else if h.Repo != nil && h.Repo.RawDB() != nil {
+		now := currentTimestamp()
+		if _, err := h.Repo.RawDB().Exec(
+			`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)`,
+			connID, "kiro", "Kiro Social", string(data), now, now,
+		); err != nil {
+			log.Error("oauth", "save Kiro social connection failed", "error", err)
 		}
-		if idToken, ok := tokenData["id_token"].(string); ok {
-			dataMap["idToken"] = idToken
-		}
-		if refreshToken, ok := tokenData["refresh_token"].(string); ok {
-			dataMap["refreshToken"] = refreshToken
-		}
-		data, err := json.Marshal(dataMap)
-		if err != nil {
-			log.Error("oauth", "marshal Kiro social data failed", "error", err)
-		} else {
-			now := currentTimestamp()
-			if _, err := h.Repo.RawDB().Exec(
-				`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'oauth', ?, 1, ?, ?, ?)`,
-				connID, "kiro", "Kiro Social", string(data), now, now,
-			); err != nil {
-				log.Error("oauth", "save Kiro social connection failed", "error", err)
-			}
-		}
-		tokenData["id"] = connID
 	}
 
-	handlerutil.WriteJSON(w, http.StatusOK, tokenData)
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"connection": map[string]any{
+			"id":       connID,
+			"provider": "kiro",
+		},
+	})
 }
 
 // HandleOAuthCodexBulkImport handles bulk Codex token import.
@@ -249,11 +314,23 @@ func (h *OAuthHandler) HandleOAuthCodexBulkImport(w http.ResponseWriter, r *http
 			log.Error("oauth", "marshal Codex bulk import failed", "error", err)
 			continue
 		}
+		priority, err := h.clientKeyImportPriority(r, "codex")
+		if err != nil {
+			log.Error("oauth", "Codex bulk import priority failed", "error", err)
+			continue
+		}
 		now := currentTimestamp()
-		_, err = h.Repo.RawDB().Exec(
-			`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, 1, ?, ?, ?)`,
-			connID, name, string(data), now, now,
-		)
+		if priority == nil {
+			_, err = h.Repo.RawDB().Exec(
+				`INSERT INTO providerConnections (id, provider, authType, name, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, 1, ?, ?, ?)`,
+				connID, name, string(data), now, now,
+			)
+		} else {
+			_, err = h.Repo.RawDB().Exec(
+				`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, 'codex', 'oauth', ?, ?, 1, ?, ?, ?)`,
+				connID, name, priority, string(data), now, now,
+			)
+		}
 		if err == nil {
 			imported = append(imported, connID)
 		}
@@ -273,6 +350,15 @@ func titleProvider(p string) string {
 		return "GitHub"
 	}
 	return p
+}
+
+// truncateForError caps upstream bodies in error messages so token endpoints
+// that echo the request cannot leak credentials into logs or API responses.
+func truncateForError(b []byte) string {
+	if len(b) > 200 {
+		return string(b[:200])
+	}
+	return string(b)
 }
 
 func currentTimestamp() string {
@@ -298,4 +384,19 @@ func randomString(n int) string {
 func sha256Base64(input string) string {
 	h := sha256.Sum256([]byte(input))
 	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// clientKeyImportPriority is the priority for a connection an import inserts:
+// NULL (unchanged behaviour) for the admin, and the end of the provider's
+// rotation when a client API key was allowed to import, so the new row never
+// moves ahead of an existing one.
+func (h *OAuthHandler) clientKeyImportPriority(r *http.Request, provider string) (*int, error) {
+	if !auth.IsClientKeyWrite(r.Context()) {
+		return nil, nil
+	}
+	p, err := h.Repo.LastConnectionPriority(provider)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }

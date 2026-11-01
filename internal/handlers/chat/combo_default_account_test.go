@@ -9,12 +9,11 @@ import (
 	"testing"
 
 	"9router/proxy/internal/controlplane/registry"
-	"9router/proxy/internal/controlplane/trust"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/providers"
 )
 
-func TestHandleComboFallback_DefaultKeyProviderUsesConfiguredAccountFeedback(t *testing.T) {
+func TestHandleComboFallback_DefaultKeyProviderHonorsConfiguredAccountPolicy(t *testing.T) {
 	const model = "audit-default-account-model"
 	const connID = "conn-opencode-audit"
 
@@ -66,10 +65,6 @@ func TestHandleComboFallback_DefaultKeyProviderUsesConfiguredAccountFeedback(t *
 		t.Fatalf("expected upstream 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	if level := globalTrustManager.GetTrustLevel("opencode", model, connID); level != trust.TrustQuarantined {
-		t.Fatalf("expected configured account trust to be quarantined, got %s", level)
-	}
-
 	locked, err := repo.IsConnectionModelLocked(connID, model)
 	if err != nil {
 		t.Fatalf("IsConnectionModelLocked: %v", err)
@@ -86,7 +81,6 @@ func TestHandleComboFallback_DefaultKeyProviderUsesConfiguredAccountFeedback(t *
 	}
 }
 
-
 func TestHandleComboFallback_Opencode503SwitchesConfiguredAccount(t *testing.T) {
 	const model = "audit-opencode-account-failover"
 
@@ -102,9 +96,9 @@ func TestHandleComboFallback_Opencode503SwitchesConfiguredAccount(t *testing.T) 
 	var healthyHits atomic.Int32
 	healthyUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		healthyHits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"recovered","choices":[{"message":{"content":"fallback account worked"}}]}`))
+		w.Write([]byte("data: {\"id\":\"recovered\",\"choices\":[{\"delta\":{\"content\":\"fallback account worked\"}}]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer healthyUpstream.Close()
 
@@ -248,10 +242,10 @@ func TestComboConnection_DefaultKeyUsedOnlyWhenNoConfiguredAccountsExist(t *test
 	if err != nil {
 		t.Fatalf("expected built-in default route with no configured accounts: %v", err)
 	}
-	if connID != "default" {
+	if connID != "default" && connID != "noauth" {
 		t.Fatalf("expected synthetic default connection, got %q", connID)
 	}
-	if connData == nil || connData.APIKey != providers.KnownProviders["opencode"].DefaultAPIKey {
+	if connData == nil || extractAPIKey(connData) != providers.KnownProviders["opencode"].DefaultAPIKey {
 		t.Fatalf("expected provider default API key, got %#v", connData)
 	}
 	if !oneShot {

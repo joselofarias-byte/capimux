@@ -1,0 +1,1201 @@
+package chat
+
+import (
+	"database/sql"
+	json "encoding/json/v2"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"9router/proxy/internal/controlplane/discovery"
+	"9router/proxy/internal/controlplane/registry"
+	"9router/proxy/internal/controlplane/routing"
+	"9router/proxy/internal/db"
+)
+
+func seedFreeRouteRegistry(t *testing.T) {
+	t.Helper()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	state := registry.GetActiveState()
+	state.Providers["groq"] = &registry.Provider{ID: "groq", IsActive: true}
+	state.Providers["deepseek"] = &registry.Provider{ID: "deepseek", IsActive: true}
+	state.Providers["cline"] = &registry.Provider{ID: "cline", IsActive: true}
+	state.ProviderModels["groq"] = map[string]*registry.ProviderModel{
+		"llama-3.1-8b:free": {
+			ProviderID:    "groq",
+			ModelID:       "llama-3.1-8b:free",
+			UpstreamModel: "llama-3.1-8b-instant",
+			PricingMode:   "free",
+			IsActive:      true,
+		},
+		"not-classified": {
+			ProviderID:  "groq",
+			ModelID:     "not-classified",
+			PricingMode: "unknown",
+			IsActive:    true,
+		},
+	}
+	state.ProviderModels["deepseek"] = map[string]*registry.ProviderModel{
+		"deepseek-chat": {
+			ProviderID:  "deepseek",
+			ModelID:     "deepseek-chat",
+			PricingMode: "paid",
+			IsActive:    true,
+		},
+		"deepseek-reasoner-free": {
+			ProviderID:  "deepseek",
+			ModelID:     "deepseek-reasoner-free",
+			PricingMode: "free_tier",
+			IsActive:    true,
+		},
+	}
+	state.ProviderModels["cline"] = map[string]*registry.ProviderModel{
+		"cline-free-model": {
+			ProviderID:  "cline",
+			ModelID:     "cline-free-model",
+			PricingMode: "free",
+			IsActive:    true,
+		},
+	}
+}
+
+func TestResolveModel_FreeBestUsesDiscoveredFreeModels(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	// Inactive local connection must not make the Cline free model routable.
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-cline', 'cline', 'apikey', 'Cline off', 1, 0, '{}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("seed inactive cline connection: %v", err)
+	}
+
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+
+	for _, name := range []string{"free-best", "FREE", "Free-Best"} {
+		info, err := h.resolveModel(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		if info.Strategy != "fallback" {
+			t.Fatalf("strategy for %s = %q", name, info.Strategy)
+		}
+		if !info.VirtualFree {
+			t.Fatalf("%s dynamic pool was not marked virtual free", name)
+		}
+		got := map[string]bool{}
+		for _, entry := range info.ComboModels {
+			got[entry] = true
+		}
+		for _, want := range []string{"groq/llama-3.1-8b-instant", "deepseek/deepseek-reasoner-free"} {
+			if !got[want] {
+				t.Errorf("%s missing %s in %#v", name, want, got)
+			}
+		}
+		for _, banned := range []string{"deepseek/deepseek-chat", "groq/not-classified", "cline/cline-free-model", "groq/llama-3.1-8b:free"} {
+			if got[banned] {
+				t.Errorf("%s included %s", name, banned)
+			}
+		}
+		if len(got) != 2 {
+			t.Fatalf("%s expected 2 free models, got %#v", name, got)
+		}
+	}
+}
+
+func TestResolveModel_ReasoningFreeFiltersNonReasoningModels(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	h := NewChatHandler(db.NewRepo(database))
+	for _, name := range []string{"reasoning-free", "REASONING-FREE", " Reasoning-Free "} {
+		info, err := h.resolveModel(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		if !info.VirtualFree {
+			t.Fatalf("%s was not marked virtual free", name)
+		}
+		if len(info.ComboModels) != 1 || info.ComboModels[0] != "deepseek/deepseek-reasoner-free" {
+			t.Fatalf("%s pool = %#v, want reasoning-only deepseek", name, info.ComboModels)
+		}
+	}
+}
+
+func TestResolveModel_ReasoningFreeFailsClosedWithoutReasoningCandidate(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+	registry.GetActiveState().ProviderModels["deepseek"]["deepseek-reasoner-free"].IsActive = false
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("reasoning-free")
+	if !errors.Is(err, ErrFreeRouteUnavailable) || info != nil {
+		t.Fatalf("reasoning-free resolved to %+v err=%v, want free_route_unavailable", info, err)
+	}
+}
+
+func TestResolveModel_FastFreePrefersMeasuredFastHealthyModel(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+	repo := db.NewRepo(database)
+
+	if err := repo.InsertRequestDetail(
+		"fast-slow", "groq", "llama-3.1-8b-instant", "", "success",
+		`{"latency":{"total":9000},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.InsertRequestDetail(
+		"fast-quick", "deepseek", "deepseek-reasoner-free", "", "success",
+		`{"latency":{"total":1000},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewChatHandler(repo)
+	info, err := h.resolveModel("fast-free")
+	if err != nil {
+		t.Fatalf("resolve fast-free: %v", err)
+	}
+	if len(info.ComboModels) != 2 {
+		t.Fatalf("fast-free pool = %#v, want two free candidates", info.ComboModels)
+	}
+	if info.ComboModels[0] != "deepseek/deepseek-reasoner-free" {
+		t.Fatalf("fast-free first = %q, want measured faster model; pool=%#v", info.ComboModels[0], info.ComboModels)
+	}
+}
+
+func TestRankFreeRouteEntriesByFastKeepsThirtyPointRiskGap(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	models := []string{"safe/unknown-free", "risky/fast-free"}
+	base := map[string]float64{
+		"safe/unknown-free": 60,
+		"risky/fast-free":    30,
+	}
+	if err := repo.InsertRequestDetail(
+		"fast-risky-success", "risky", "fast-free", "", "success",
+		`{"latency":{"total":300},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByFast(models, base)
+	if got[0] != "safe/unknown-free" {
+		t.Fatalf("fast profile erased 30-point base risk gap: %#v", got)
+	}
+}
+
+func TestResolveModel_CodingBestFreePrefersCodingModel(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	registry.GetActiveState().ProviderModels["groq"]["qwen-coder-free"] = &registry.ProviderModel{
+		ProviderID:    "groq",
+		ModelID:       "qwen-coder-free",
+		UpstreamModel: "qwen2.5-coder-32b-free",
+		PricingMode:   "free",
+		IsActive:      true,
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	for _, name := range []string{"coding-best-free", "CODING-BEST-FREE", "coding-auto", "CODING-AUTO"} {
+		info, err := h.resolveModel(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		if len(info.ComboModels) < 3 {
+			t.Fatalf("%s pool = %#v, expected coding plus fallback free models", name, info.ComboModels)
+		}
+		if info.ComboModels[0] != "groq/qwen2.5-coder-32b-free" {
+			t.Fatalf("%s first = %q, want coding-specialized model; pool=%#v", name, info.ComboModels[0], info.ComboModels)
+		}
+		for _, entry := range info.ComboModels {
+			if entry == "deepseek/deepseek-chat" {
+				t.Fatalf("%s leaked paid model into coding profile: %#v", name, info.ComboModels)
+			}
+		}
+	}
+}
+
+func TestResolveModel_LongContextFreePrefersLargerContext(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	registry.GetActiveState().ProviderModels["groq"]["longcat-free"] = &registry.ProviderModel{
+		ProviderID:    "groq",
+		ModelID:       "longcat-free",
+		UpstreamModel: "longcat-flash-free",
+		PricingMode:   "free",
+		IsActive:      true,
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("long-context-free")
+	if err != nil {
+		t.Fatalf("resolve long-context-free: %v", err)
+	}
+	if info.ComboModels[0] != "groq/longcat-flash-free" {
+		t.Fatalf("long-context-free first = %q, want 200k LongCat; pool=%#v", info.ComboModels[0], info.ComboModels)
+	}
+}
+
+func TestProfileBonusCannotEraseThirtyPointRiskGap(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	models := []string{"safe/unknown-free", "risky/coder-free"}
+	base := map[string]float64{
+		"safe/unknown-free": 60,
+		"risky/coder-free":   30,
+	}
+	if err := repo.InsertRequestDetail(
+		"profile-risky-success", "risky", "coder-free", "", "success",
+		`{"latency":{"total":200},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByProfileBonus(models, base, func(entry string) float64 {
+		if entry == "risky/coder-free" {
+			return 100
+		}
+		return 0
+	}, "test")
+	if got[0] != "safe/unknown-free" {
+		t.Fatalf("profile bonus erased 30-point base risk gap: %#v", got)
+	}
+}
+
+func TestResolveModel_ExplicitFreeComboWins(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	models, _ := json.Marshal([]string{"deepseek/deepseek-chat"})
+	if _, err := database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"user-free", "free", "fallback", string(models), "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z"); err != nil {
+		t.Fatalf("seed combo: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("free")
+	if err != nil {
+		t.Fatalf("resolve explicit combo: %v", err)
+	}
+	if len(info.ComboModels) != 1 || info.ComboModels[0] != "deepseek/deepseek-chat" {
+		t.Fatalf("explicit combo was replaced by the dynamic pool: %#v", info.ComboModels)
+	}
+	if info.VirtualFree {
+		t.Fatal("explicit combo was marked as the virtual free pool")
+	}
+}
+
+func TestResolveModel_FreeBestDoesNotFallThroughToPaidProvider(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("free-best")
+	if !errors.Is(err, ErrFreeRouteUnavailable) {
+		t.Fatalf("err = %v, want free_route_unavailable", err)
+	}
+	if info != nil {
+		t.Fatalf("free-best fell through to %+v", info)
+	}
+}
+
+func TestHandleModels_ListsVirtualFreeRoutes(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	h.HandleModels(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := map[string]string{}
+	for _, m := range resp.Data {
+		found[m.ID] = m.OwnedBy
+	}
+	for _, id := range []string{"free", "free-best", "fast-free", "reasoning-free", "coding-best-free", "coding-auto", "long-context-free"} {
+		if found[id] != "fabric" {
+			t.Errorf("model %s owned_by=%q, want fabric", id, found[id])
+		}
+	}
+}
+
+func TestResolveModel_PaidAndUnclassifiedPoolFailsClosed(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	state := registry.GetActiveState()
+	state.Providers["groq"] = &registry.Provider{ID: "groq", IsActive: true}
+	state.Providers["deepseek"] = &registry.Provider{ID: "deepseek", IsActive: true}
+	state.ProviderModels["groq"] = map[string]*registry.ProviderModel{
+		"not-classified": {ProviderID: "groq", ModelID: "not-classified", PricingMode: "unknown", IsActive: true},
+		"trial":          {ProviderID: "groq", ModelID: "trial", PricingMode: "trial", IsActive: true},
+		"upper":          {ProviderID: "groq", ModelID: "upper", PricingMode: "FREE", IsActive: true},
+	}
+	state.ProviderModels["deepseek"] = map[string]*registry.ProviderModel{
+		"deepseek-chat": {ProviderID: "deepseek", ModelID: "deepseek-chat", PricingMode: "paid", IsActive: true},
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	for _, name := range []string{"free", "free-best", "fast-free", "reasoning-free", "coding-best-free", "coding-auto", "long-context-free", "FREE", " Free-Best ", " FAST-FREE ", "REASONING-FREE", " CODING-BEST-FREE ", " CODING-AUTO ", "LONG-CONTEXT-FREE"} {
+		info, err := h.resolveModel(name)
+		if !errors.Is(err, ErrFreeRouteUnavailable) || info != nil {
+			t.Fatalf("%s resolved to %+v err=%v, want free_route_unavailable", name, info, err)
+		}
+	}
+}
+
+func TestResolveModel_DisconnectAndReconnectChangesFreePool(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	state := registry.GetActiveState()
+	state.Providers["groq"] = &registry.Provider{ID: "groq", IsActive: true}
+	state.Providers["deepseek"] = &registry.Provider{ID: "deepseek", IsActive: true}
+	state.Providers["ghost"] = &registry.Provider{ID: "ghost", IsActive: false}
+	state.ProviderModels["groq"] = map[string]*registry.ProviderModel{
+		"llama": {ProviderID: "groq", ModelID: "llama", UpstreamModel: "llama-free", PricingMode: "free", IsActive: true},
+		"off":   {ProviderID: "groq", ModelID: "off", UpstreamModel: "llama-off", PricingMode: "free", IsActive: false},
+	}
+	state.ProviderModels["deepseek"] = map[string]*registry.ProviderModel{
+		"deepseek-chat": {ProviderID: "deepseek", ModelID: "deepseek-chat", PricingMode: "paid", IsActive: true},
+	}
+	state.ProviderModels["ghost"] = map[string]*registry.ProviderModel{
+		"ghost-free": {ProviderID: "ghost", ModelID: "ghost-free", PricingMode: "free", IsActive: true},
+	}
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-ghost', 'ghost', 'apikey', 'Ghost', 1, 1, '{}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("seed ghost connection: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("free-best")
+	if err != nil {
+		t.Fatalf("connected free route: %v", err)
+	}
+	assertExactPool(t, info, []string{"groq/llama-free"})
+
+	if _, err := database.Exec(`UPDATE providerConnections SET isActive = 0 WHERE id = 'conn-2'`); err != nil {
+		t.Fatalf("deactivate groq: %v", err)
+	}
+	info, err = h.resolveModel("FREE")
+	if err == nil || info != nil {
+		t.Fatalf("disconnected free route resolved to %+v", info)
+	}
+
+	if _, err := database.Exec(`DELETE FROM providerConnections WHERE id = 'conn-2'`); err != nil {
+		t.Fatalf("delete groq: %v", err)
+	}
+	info, err = h.resolveModel("free")
+	if err == nil || info != nil {
+		t.Fatalf("deleted provider resolved to %+v", info)
+	}
+
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES
+		('conn-2b', 'groq', 'apikey', 'Groq again', 1, 1, '{}', '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`); err != nil {
+		t.Fatalf("reconnect groq: %v", err)
+	}
+	info, err = h.resolveModel(" free-best ")
+	if err != nil {
+		t.Fatalf("reconnected free route: %v", err)
+	}
+	assertExactPool(t, info, []string{"groq/llama-free"})
+}
+
+func TestResolveModel_ExplicitFreeOverrideWinsAnyCase(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	models, _ := json.Marshal([]string{"deepseek/deepseek-chat"})
+	if _, err := database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"user-free", "free", "fallback", string(models), "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z"); err != nil {
+		t.Fatalf("seed combo: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('modelAliases', 'Free-Best', '"groq/llama-3.1-8b-instant"')`); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	for _, name := range []string{"FREE", " free "} {
+		info, err := h.resolveModel(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		if len(info.ComboModels) != 1 || info.ComboModels[0] != "deepseek/deepseek-chat" {
+			t.Fatalf("%s did not keep the explicit combo: %#v", name, info.ComboModels)
+		}
+	}
+	for _, name := range []string{"free-best", "FREE-BEST"} {
+		info, err := h.resolveModel(name)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", name, err)
+		}
+		if info.Provider != "groq" || info.Model != "llama-3.1-8b-instant" || len(info.ComboModels) != 0 {
+			t.Fatalf("%s did not keep the explicit alias: %+v", name, info)
+		}
+	}
+}
+
+func TestResolveModel_VirtualFreeDoesNotChangeNormalRouting(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+
+	info, err := h.resolveModel("deepseek/deepseek-chat")
+	if err != nil || info.Provider != "deepseek" || info.Model != "deepseek-chat" || len(info.ComboModels) != 0 {
+		t.Fatalf("provider/model route changed: %+v %v", info, err)
+	}
+	info, err = h.resolveModel("fast-model")
+	if err != nil || info.Provider != "deepseek" || info.Model != "deepseek-chat" {
+		t.Fatalf("alias route changed: %+v %v", info, err)
+	}
+	info, err = h.resolveModel("my-combo")
+	if err != nil || info.Provider != "deepseek" || info.Model != "deepseek-chat" || len(info.ComboModels) != 1 {
+		t.Fatalf("combo route changed: %+v %v", info, err)
+	}
+	info, err = h.resolveModel("free-tier")
+	if err != nil || info.Provider != "deepseek" || info.Model != "free-tier" || len(info.ComboModels) != 0 {
+		t.Fatalf("bare free-tier should stay on the common fallback: %+v %v", info, err)
+	}
+	info, err = h.resolveModel("openai/free")
+	if err != nil || info.Provider != "openai" || info.Model != "free" || len(info.ComboModels) != 0 {
+		t.Fatalf("explicit openai/free was rewritten: %+v %v", info, err)
+	}
+	info, err = h.resolveModel("openai/free-best")
+	if err != nil || info.Provider != "openai" || info.Model != "free-best" {
+		t.Fatalf("explicit openai/free-best was rewritten: %+v %v", info, err)
+	}
+}
+
+func TestHandleModels_ExplicitFreeNameKeepsVirtualSibling(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	models, _ := json.Marshal([]string{"deepseek/deepseek-chat"})
+	if _, err := database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"user-free", "Free", "llm", string(models), "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z"); err != nil {
+		t.Fatalf("seed combo: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	h.HandleModels(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	var resp struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := map[string]string{}
+	for _, m := range resp.Data {
+		found[m.ID] = m.OwnedBy
+	}
+	if found["Free"] != "combo" {
+		t.Fatalf("explicit Free combo missing: %#v", found)
+	}
+	if _, dup := found["free"]; dup {
+		t.Fatal("virtual free was listed beside the explicit Free combo")
+	}
+	if found["free-best"] != "fabric" {
+		t.Fatalf("free-best owned_by=%q, want fabric", found["free-best"])
+	}
+}
+
+func TestResolveModel_FreeBestConcurrentExcludesPaid(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			info, err := h.resolveModel("free-best")
+			if err != nil {
+				errCh <- err
+				return
+			}
+			for _, entry := range info.ComboModels {
+				switch entry {
+				case "groq/llama-3.1-8b-instant", "deepseek/deepseek-reasoner-free":
+				default:
+					errCh <- fmt.Errorf("unexpected candidate %s", entry)
+				}
+			}
+			if len(info.ComboModels) != 2 {
+				errCh <- fmt.Errorf("candidate count %d", len(info.ComboModels))
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+}
+
+func TestRankFreeRouteEntriesByRecentHealth(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	models := []string{
+		"opencode/bad-free",
+		"opencode/unknown-free",
+		"opencode/good-free",
+	}
+	base := map[string]float64{
+		"opencode/bad-free":     40,
+		"opencode/unknown-free": 40,
+		"opencode/good-free":    40,
+	}
+
+	if err := repo.InsertRequestDetail(
+		"health-bad", "opencode", "bad-free", "", "error",
+		`{"latency":{"total":250},"response":{"status":502}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.InsertRequestDetail(
+		"health-good", "opencode", "good-free", "", "success",
+		`{"latency":{"total":900},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByRecentHealth(models, base)
+	want := []string{
+		"opencode/good-free",
+		"opencode/unknown-free",
+		"opencode/bad-free",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("health order = %#v, want %#v", got, want)
+	}
+}
+
+func TestRankFreeRouteEntriesBreaksEqualHealthScoreByLatency(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	// Both successful models receive the same +23 health adjustment because
+	// both latencies are above the 7s bonus threshold. The tie must therefore
+	// be resolved by the actual measured average latency, not the shuffled
+	// candidate order.
+	models := []string{"opencode/slow-free", "opencode/faster-free"}
+	base := map[string]float64{
+		"opencode/slow-free":   30,
+		"opencode/faster-free": 30,
+	}
+
+	if err := repo.InsertRequestDetail(
+		"health-slow", "opencode", "slow-free", "", "success",
+		`{"latency":{"total":22000},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.InsertRequestDetail(
+		"health-faster", "opencode", "faster-free", "", "success",
+		`{"latency":{"total":14000},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByRecentHealth(models, base)
+	if got[0] != "opencode/faster-free" {
+		t.Fatalf("latency tie-break did not prefer faster proven model: %#v", got)
+	}
+}
+
+func TestRankFreeRouteEntriesHealthCannotEraseLargeBaseRiskGap(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	models := []string{"safe/unknown-free", "risky/proven-free"}
+	base := map[string]float64{
+		"safe/unknown-free": 60,
+		"risky/proven-free": 30,
+	}
+	if err := repo.InsertRequestDetail(
+		"health-risky-success", "risky", "proven-free", "", "success",
+		`{"latency":{"total":500},"response":{"content":"ok"}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByRecentHealth(models, base)
+	if got[0] != "safe/unknown-free" {
+		t.Fatalf("health bonus erased base risk gap: %#v", got)
+	}
+}
+
+func TestRankFreeRouteEntriesIgnoresStaleAndClientRequestFailures(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	models := []string{"opencode/a-free", "opencode/b-free"}
+	base := map[string]float64{"opencode/a-free": 40, "opencode/b-free": 40}
+
+	if err := repo.InsertRequestDetail(
+		"health-stale", "opencode", "a-free", "", "error",
+		`{"latency":{"total":100},"response":{"status":502}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-freeRouteHealthWindow - time.Minute).Format("2006-01-02T15:04:05.000Z")
+	if _, err := database.Exec(`UPDATE requestDetails SET timestamp = ? WHERE id = ?`, old, "health-stale"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.InsertRequestDetail(
+		"health-400", "opencode", "a-free", "", "error",
+		`{"latency":{"total":100},"response":{"status":400}}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := h.rankFreeRouteEntriesByRecentHealth(models, base)
+	if !reflect.DeepEqual(got, models) {
+		t.Fatalf("stale/request-specific failures changed order: %#v", got)
+	}
+}
+
+func TestRankFreeRouteEntriesPushesQuarantinedModelToBack(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	h := NewChatHandler(db.NewRepo(database))
+
+	entry := "opencode/a-free"
+	virtualFreeModelQuarantine.Store(entry, virtualFreeQuarantineEntry{
+		quarantinedAt: time.Now().UTC(),
+		until:         time.Now().UTC().Add(time.Minute),
+	})
+	defer virtualFreeModelQuarantine.Delete(entry)
+
+	models := []string{entry, "opencode/b-free"}
+	base := map[string]float64{entry: 50, "opencode/b-free": 40}
+	got := h.rankFreeRouteEntriesByRecentHealth(models, base)
+	if got[0] != "opencode/b-free" {
+		t.Fatalf("quarantined model stayed in front: %#v", got)
+	}
+}
+
+func TestFreeRouteEntries_RejectsPaidInactiveAndDisconnected(t *testing.T) {
+	state := &registry.RegistryState{
+		Providers: map[string]*registry.Provider{
+			"groq":     {ID: "groq", IsActive: true},
+			"deepseek": {ID: "deepseek", IsActive: true},
+			"ghost":    {ID: "ghost", IsActive: false},
+		},
+		ProviderModels: map[string]map[string]*registry.ProviderModel{
+			"groq": {
+				"llama": {ProviderID: "groq", ModelID: "llama", UpstreamModel: "llama-free", PricingMode: "free", IsActive: true},
+			},
+			"deepseek": {
+				"deepseek-chat": {ProviderID: "deepseek", ModelID: "deepseek-chat", PricingMode: "paid", IsActive: true},
+				"mystery":       {ProviderID: "deepseek", ModelID: "mystery", PricingMode: "unknown", IsActive: true},
+			},
+			"ghost": {
+				"ghost-free": {ProviderID: "ghost", ModelID: "ghost-free", PricingMode: "free_tier", IsActive: true},
+			},
+		},
+		Accounts: map[string]*registry.Account{
+			"groq-on":  {ID: "groq-on", ProviderID: "groq", IsActive: true},
+			"groq-off": {ID: "groq-off", ProviderID: "groq", IsActive: false},
+			"ds-on":    {ID: "ds-on", ProviderID: "deepseek", IsActive: true},
+			"ghost-on": {ID: "ghost-on", ProviderID: "ghost", IsActive: true},
+		},
+	}
+	got := freeRouteEntries(state, []routing.RouteNode{
+		{ProviderID: "groq", ModelID: "llama", UpstreamModel: "stale-paid-name", AccountID: "groq-off"},
+		{ProviderID: "groq", ModelID: "llama", UpstreamModel: "stale-paid-name", AccountID: "groq-on"},
+		{ProviderID: "deepseek", ModelID: "deepseek-chat", AccountID: "ds-on"},
+		{ProviderID: "deepseek", ModelID: "mystery", AccountID: "ds-on"},
+		{ProviderID: "ghost", ModelID: "ghost-free", AccountID: "ghost-on"},
+	})
+	if len(got) != 1 || got[0] != "groq/llama-free" {
+		t.Fatalf("entries = %#v, want only the current free upstream", got)
+	}
+}
+
+func TestFreeEntryStillEligible_DropsPaidInactiveAndDisconnected(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+
+	if !h.freeEntryStillEligible("groq/llama-3.1-8b-instant") || !h.freeEntryStillEligible("deepseek/deepseek-reasoner-free") {
+		t.Fatal("seeded free entries were not eligible")
+	}
+	if h.freeEntryStillEligible("deepseek/deepseek-chat") || h.freeEntryStillEligible("cline/cline-free-model") {
+		t.Fatal("paid or disconnected model was eligible")
+	}
+
+	state := registry.GetActiveState()
+	state.ProviderModels["deepseek"]["deepseek-reasoner-free"].PricingMode = "paid"
+	if h.freeEntryStillEligible("deepseek/deepseek-reasoner-free") {
+		t.Fatal("paid model stayed eligible")
+	}
+	state.ProviderModels["deepseek"]["deepseek-reasoner-free"].PricingMode = "free_tier"
+
+	state.Providers["groq"].IsActive = false
+	if h.freeEntryStillEligible("groq/llama-3.1-8b-instant") {
+		t.Fatal("inactive provider stayed eligible")
+	}
+	state.Providers["groq"].IsActive = true
+
+	state.ProviderModels["groq"]["llama-3.1-8b:free"].IsActive = false
+	if h.freeEntryStillEligible("groq/llama-3.1-8b-instant") {
+		t.Fatal("inactive model stayed eligible")
+	}
+	state.ProviderModels["groq"]["llama-3.1-8b:free"].IsActive = true
+
+	if _, err := database.Exec(`UPDATE providerConnections SET isActive = 0 WHERE id = 'conn-2'`); err != nil {
+		t.Fatalf("deactivate groq: %v", err)
+	}
+	if h.freeEntryStillEligible("groq/llama-3.1-8b-instant") {
+		t.Fatal("disconnected provider stayed eligible")
+	}
+}
+
+func TestHandleChatCompletions_EmptyFreePoolReturnsUnavailable(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		http.Error(w, "paid upstream", http.StatusOK)
+	}))
+	defer srv.Close()
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", srv.URL)
+	pointConnectionAt(t, database, "conn-2", "gsk-test-groq-key", srv.URL)
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"free-best","messages":[{"role":"user","content":"hola"}]}`))
+	h.HandleChatCompletions(rec, req)
+
+	assertFreeRouteUnavailable(t, rec)
+	if hits.Load() != 0 {
+		t.Fatalf("empty free pool called upstream %d times", hits.Load())
+	}
+}
+
+func TestHandleMessages_EmptyFreePoolReturnsUnavailable(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	if err := registry.InitRegistry(nil); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", srv.URL)
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+		`{"model":"free","max_tokens":8,"messages":[{"role":"user","content":"hola"}]}`))
+	h.HandleMessages(rec, req)
+
+	assertFreeRouteUnavailable(t, rec)
+	if hits.Load() != 0 {
+		t.Fatalf("messages free route called upstream %d times", hits.Load())
+	}
+}
+
+func TestHandleComboFallback_SkipsCandidateThatBecamePaid(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	var groqHits, deepseekHits atomic.Int32
+	groqSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		groqHits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("groq body: %v", err)
+		}
+		if req["model"] != "llama-3.1-8b-instant" {
+			t.Errorf("groq model = %v", req["model"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"gratis"}}]}`))
+	}))
+	defer groqSrv.Close()
+	deepseekSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deepseekHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		http.Error(w, "should not be called", http.StatusPaymentRequired)
+	}))
+	defer deepseekSrv.Close()
+	pointConnectionAt(t, database, "conn-2", "gsk-test-groq-key", groqSrv.URL)
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", deepseekSrv.URL)
+
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("free-best")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !info.VirtualFree {
+		t.Fatal("expected virtual free pool")
+	}
+
+	registry.GetActiveState().ProviderModels["deepseek"]["deepseek-reasoner-free"].PricingMode = "paid"
+
+	rec := httptest.NewRecorder()
+	body := []byte(`{"model":"free-best","messages":[{"role":"user","content":"hola"}]}`)
+	h.handleComboFallback(t.Context(), rec, body, info.ComboModels, info.Strategy, false, false, "free-best", 0, true)
+
+	if deepseekHits.Load() != 0 {
+		t.Fatalf("paid hop was attempted %d times", deepseekHits.Load())
+	}
+	if groqHits.Load() != 1 {
+		t.Fatalf("free hop hits = %d, status %d body %s", groqHits.Load(), rec.Code, rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleComboFallback_SkipsQuarantinedVirtualFreeModel(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	var groqHits, deepseekHits atomic.Int32
+	groqSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		groqHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"groq","choices":[{"message":{"role":"assistant","content":"should-not-run"}}]}`))
+	}))
+	defer groqSrv.Close()
+	deepseekSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deepseekHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"deepseek","choices":[{"message":{"role":"assistant","content":"fallback-ok"}}]}`))
+	}))
+	defer deepseekSrv.Close()
+
+	pointConnectionAt(t, database, "conn-2", "gsk-test-groq-key", groqSrv.URL)
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", deepseekSrv.URL)
+
+	entry := "groq/llama-3.1-8b-instant"
+	virtualFreeModelQuarantine.Store(entry, virtualFreeQuarantineEntry{
+		quarantinedAt: time.Now().UTC(),
+		until:         time.Now().UTC().Add(time.Minute),
+	})
+	defer virtualFreeModelQuarantine.Delete(entry)
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	body := []byte(`{"model":"free-best","messages":[{"role":"user","content":"hola"}]}`)
+	h.handleComboFallback(t.Context(), rec, body,
+		[]string{entry, "deepseek/deepseek-reasoner-free"},
+		"fallback", false, false, "free-best", 0, true)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if groqHits.Load() != 0 {
+		t.Fatalf("quarantined model was called %d times", groqHits.Load())
+	}
+	if deepseekHits.Load() != 1 {
+		t.Fatalf("healthy fallback hits = %d, want 1", deepseekHits.Load())
+	}
+}
+
+func TestHandleComboFallback_AllHopsBecameIneligibleFailsClosed(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", srv.URL)
+	pointConnectionAt(t, database, "conn-2", "gsk-test-groq-key", srv.URL)
+
+	seedFreeRouteRegistry(t)
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("FREE")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	state := registry.GetActiveState()
+	state.ProviderModels["groq"]["llama-3.1-8b:free"].PricingMode = "paid"
+	state.ProviderModels["deepseek"]["deepseek-reasoner-free"].IsActive = false
+
+	rec := httptest.NewRecorder()
+	body := []byte(`{"model":"free","messages":[{"role":"user","content":"hola"}]}`)
+	h.handleComboFallback(t.Context(), rec, body, info.ComboModels, info.Strategy, false, false, "free", 0, info.VirtualFree)
+
+	assertFreeRouteUnavailable(t, rec)
+	if hits.Load() != 0 {
+		t.Fatalf("ineligible hops called upstream %d times", hits.Load())
+	}
+}
+
+func TestHandleChatCompletions_ExplicitFreeComboKeepsPaidModel(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	seedFreeRouteRegistry(t)
+
+	var groqHits, deepseekHits atomic.Int32
+	groqSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		groqHits.Add(1)
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer groqSrv.Close()
+	deepseekSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deepseekHits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		_ = json.Unmarshal(body, &req)
+		if req["model"] != "deepseek-chat" {
+			t.Errorf("explicit combo model = %v", req["model"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"paid","choices":[{"message":{"role":"assistant","content":"combo"}}]}`))
+	}))
+	defer deepseekSrv.Close()
+	pointConnectionAt(t, database, "conn-2", "gsk-test-groq-key", groqSrv.URL)
+	pointConnectionAt(t, database, "conn-1", "sk-test-deepseek-key", deepseekSrv.URL)
+
+	models, _ := json.Marshal([]string{"deepseek/deepseek-chat"})
+	if _, err := database.Exec(`INSERT INTO combos (id, name, kind, models, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+		"user-free-paid", "free", "fallback", string(models), "2026-07-19T00:00:00Z", "2026-07-19T00:00:00Z"); err != nil {
+		t.Fatalf("seed combo: %v", err)
+	}
+
+	h := NewChatHandler(db.NewRepo(database))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"free","messages":[{"role":"user","content":"hola"}]}`))
+	h.HandleChatCompletions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if deepseekHits.Load() != 1 || groqHits.Load() != 0 {
+		t.Fatalf("deepseek hits=%d groq hits=%d; explicit paid combo was rewritten", deepseekHits.Load(), groqHits.Load())
+	}
+}
+
+func pointConnectionAt(t *testing.T, database *sql.DB, id, apiKey, baseURL string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]string{"apiKey": apiKey, "baseUrl": baseURL})
+	if err != nil {
+		t.Fatalf("marshal connection: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE providerConnections SET data = ? WHERE id = ?`, string(data), id); err != nil {
+		t.Fatalf("point connection %s: %v", id, err)
+	}
+}
+
+func assertFreeRouteUnavailable(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body %s", err, rec.Body.String())
+	}
+	if resp.Error.Code != FreeRouteUnavailableCode {
+		t.Fatalf("code = %q, want %s", resp.Error.Code, FreeRouteUnavailableCode)
+	}
+	if resp.Error.Type != "server_error" || resp.Error.Message == "" {
+		t.Fatalf("error = %+v", resp.Error)
+	}
+	if strings.Contains(rec.Body.String(), "sk-") || strings.Contains(rec.Body.String(), "gsk-") {
+		t.Fatalf("response leaked a credential: %s", rec.Body.String())
+	}
+}
+
+func assertExactPool(t *testing.T, info *ModelInfo, want []string) {
+	t.Helper()
+	got := map[string]bool{}
+	for _, entry := range info.ComboModels {
+		got[entry] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pool = %#v, want %v", got, want)
+	}
+	for _, entry := range want {
+		if !got[entry] {
+			t.Fatalf("pool = %#v, missing %s", got, entry)
+		}
+	}
+}
+
+
+func TestResolveModel_FreeBestBuiltinPoolExcludesRetiredMimoFree(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	if err := db.RunMigrations(database); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	if err := registry.InitRegistry(database); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	discovery.NewOrchestrator(database, []discovery.Adapter{
+		discovery.NewBuiltinFreeAdapter(),
+	}).RunSync(t.Context())
+
+	h := NewChatHandler(db.NewRepo(database))
+	info, err := h.resolveModel("free-best")
+	if err != nil {
+		t.Fatalf("resolve free-best: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, entry := range info.ComboModels {
+		got[entry] = true
+	}
+
+	for _, want := range []string{
+		"opencode/muse-spark-1.3-contributor-free",
+		"opencode/muse-spark-1.2-contributor-free",
+	} {
+		if !got[want] {
+			t.Errorf("free-best missing %s in %#v", want, info.ComboModels)
+		}
+	}
+
+	if got["mimo-free/mimo-auto"] {
+		t.Fatalf("retired mimo-auto leaked into builtin free-best pool: %#v", info.ComboModels)
+	}
+	if len(got) != 2 {
+		t.Fatalf("free-best builtin pool = %#v, want exactly 2 entries", info.ComboModels)
+	}
+}
+
+
+func TestResolveModelEntry_ExperientialPreservesVendorPath(t *testing.T) {
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	h := NewChatHandler(db.NewRepo(database))
+	info := h.resolveModelEntry("experiential/anthropic/claude-haiku-5.5:free")
+	if info == nil {
+		t.Fatal("Experiential entry did not resolve")
+	}
+	if info.Provider != "experiential" {
+		t.Fatalf("provider = %q, want experiential", info.Provider)
+	}
+	if info.Model != "anthropic/claude-haiku-5.5:free" {
+		t.Fatalf("model = %q, strict-free vendor path was not preserved", info.Model)
+	}
+}
+
+func TestFreeRouteEntries_ExperientialPreservesStrictFreeUpstream(t *testing.T) {
+	state := &registry.RegistryState{
+		Providers: map[string]*registry.Provider{
+			"experiential": {ID: "experiential", IsActive: true},
+		},
+		ProviderModels: map[string]map[string]*registry.ProviderModel{
+			"experiential": {
+				"anthropic/claude-haiku-5.5:free": {
+					ProviderID:    "experiential",
+					ModelID:       "anthropic/claude-haiku-5.5:free",
+					UpstreamModel: "anthropic/claude-haiku-5.5:free",
+					PricingMode:   "free",
+					IsActive:      true,
+				},
+			},
+		},
+		Accounts: map[string]*registry.Account{
+			"exp-on": {ID: "exp-on", ProviderID: "experiential", IsActive: true},
+		},
+	}
+	got := freeRouteEntries(state, []routing.RouteNode{{
+		ProviderID: "experiential",
+		ModelID:    "anthropic/claude-haiku-5.5:free",
+		AccountID:  "exp-on",
+	}})
+	want := "experiential/anthropic/claude-haiku-5.5:free"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("entries = %#v, want %q", got, want)
+	}
+}

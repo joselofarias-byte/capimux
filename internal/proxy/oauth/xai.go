@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"9router/proxy/internal/providers"
 )
 
 // xaiClientID is the public OAuth client ID for xAI.
@@ -48,7 +50,7 @@ func refreshXAI(ctx context.Context, p *Params) (*TokenResult, error) {
 		return nil, fmt.Errorf("OAuth response exceeds 1 MiB")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("xAI refresh returned %d: %s", resp.StatusCode, truncateBody(body))
+		return nil, fmt.Errorf("xAI %w", &providers.OAuthRefreshError{Status: resp.StatusCode, Body: truncateBody(body)})
 	}
 
 	var result struct {
@@ -65,7 +67,8 @@ func refreshXAI(ctx context.Context, p *Params) (*TokenResult, error) {
 	}
 
 	return &TokenResult{
-		AccessToken: result.AccessToken,
-		ExpiresIn:   result.ExpiresIn,
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		ExpiresIn:    result.ExpiresIn,
 	}, nil
 }

@@ -1,0 +1,368 @@
+package dashboard
+
+import (
+	json "encoding/json/v2"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"9router/proxy/internal/db"
+	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
+)
+
+// HandleGetCombos handles GET /api/combos.
+// Returns a list of combos from Repo.GetCombos().
+func (h *DashboardHandler) HandleGetCombos(w http.ResponseWriter, r *http.Request) {
+	combos, err := h.Repo.GetCombos()
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if combos == nil {
+		combos = []*models.Combo{}
+	}
+	// Each combo also carries read-only review fields: generated,
+	// needsReview, reviewReason and unavailableModels (additive).
+	reviews, err := h.comboReviews(combos)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(combos))
+	for _, c := range combos {
+		m, err := comboWithReview(c, reviews[c.ID])
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, m)
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, out)
+}
+
+// HandleCreateCombo handles POST /api/combos.
+// Parses id, name, kind, models (json array/string), strategy. Calls CreateCombo.
+func (h *DashboardHandler) HandleCreateCombo(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+		Models   any    `json:"models"`
+		Strategy string `json:"strategy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	if req.Name == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing combo name")
+		return
+	}
+	if req.ID == "" {
+		req.ID = uuid.New().String()
+	}
+	if req.Strategy == "" {
+		req.Strategy = "fallback"
+	}
+	if !db.IsValidComboStrategy(req.Strategy) {
+		writeInvalidComboStrategy(w, req.Strategy)
+		return
+	}
+
+	modelsJSON := "[]"
+	if req.Models != nil {
+		switch m := req.Models.(type) {
+		case string:
+			modelsJSON = m
+		default:
+			b, err := json.Marshal(m)
+			if err == nil {
+				modelsJSON = string(b)
+			}
+		}
+	}
+	// A combo name is addressed bare, so it must not be shadowed by a model
+	// alias (consulted first) or read as a custom model id in /v1/models.
+	if h.guardNameCollision(w, nsCombo, req.Name) {
+		return
+	}
+	if err := h.Repo.CreateCombo(req.ID, req.Name, req.Kind, modelsJSON, req.Strategy); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": req.ID})
+}
+
+// HandleUpdateCombo handles PUT /api/combos/{id}.
+// Updates combo.
+func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Request) {
+	id := getURLParam(r, "id")
+	if id == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing combo id")
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+		Models   any    `json:"models"`
+		Strategy string `json:"strategy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	existing, err := h.Repo.GetComboById(id)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil {
+		handlerutil.WriteJSONError(w, http.StatusNotFound, "combo not found")
+		return
+	}
+
+	name := req.Name
+	if name == "" {
+		name = existing.Name
+	}
+	kind := req.Kind
+	if kind == "" && existing.Kind != nil {
+		kind = *existing.Kind
+	}
+	modelsJSON := existing.Models
+	if req.Models != nil {
+		switch m := req.Models.(type) {
+		case string:
+			modelsJSON = m
+		default:
+			b, err := json.Marshal(m)
+			if err == nil {
+				modelsJSON = string(b)
+			}
+		}
+	}
+	// An empty strategy leaves the saved one alone (UpdateCombo skips it), so
+	// editing the name, models or kind never rewrites the combo's strategy.
+	strategy := req.Strategy
+	if strategy != "" && !db.IsValidComboStrategy(strategy) {
+		writeInvalidComboStrategy(w, strategy)
+		return
+	}
+	// Renaming a combo moves the bare name it answers to, so a rename gets the
+	// same check as a create. Leaving the name alone is unaffected: the guard
+	// skips the combo space when the caller is writing a combo.
+	if name != existing.Name && h.guardNameCollision(w, nsCombo, name) {
+		return
+	}
+	if err := h.Repo.UpdateCombo(id, name, kind, modelsJSON, strategy); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+}
+
+// autoFreeComboKind marks a combo that the dashboard auto-generates from the
+// registry's free-tier models. The kind is informational: it tags the combo as
+// machine-generated so the card can badge it, and it is what Auto Free Tier
+// rewrites on every rebuild. It grants no lock — a generated combo is an
+// ordinary row that can be renamed, edited and deleted like any other, and
+// rebuilding after a delete recreates it.
+const autoFreeComboKind = "auto-free"
+
+// AutoFreeComboID is the stable id of the auto-generated free-tier combo.
+const AutoFreeComboID = "auto-free-tier"
+
+// HandleAutoFreeCombo handles POST /api/combos/auto-free.
+// (Re)builds the free-tier combo from registry models of providers the user
+// actually has a connection for, so the combo never references unreachable
+// providers. The write is an upsert on AutoFreeComboID, so rebuilding an
+// edited combo replaces the edits — which is why the rebuild is an explicit
+// button rather than something that happens on connection changes.
+func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Request) {
+	models, err := h.freeTierComboModels(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(models) < minFamilyMembers {
+		// A fallback chain needs two models. Prune the generated combo if it
+		// is still untouched; a combo the user edited stays and is flagged.
+		pruned, perr := h.pruneGeneratedCombos(r.Context())
+		if perr != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, perr.Error())
+			return
+		}
+		handlerutil.WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":  fmt.Sprintf("Se necesitan al menos dos modelos gratuitos disponibles (proveedor con conexión activa y modelo habilitado) para el combo Auto Free Tier; hay %d.", len(models)),
+			"count":  len(models),
+			"pruned": pruned,
+		})
+		return
+	}
+
+	modelsJSON, err := json.Marshal(models)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, "failed to encode models")
+		return
+	}
+
+	name := "Auto Free Tier"
+	existing, err := h.Repo.GetComboById(AutoFreeComboID)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if existing == nil {
+		if err := h.Repo.CreateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), "fallback"); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), ""); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := h.markGenerated(AutoFreeComboID, autoFreeComboKind, name, models, "fallback"); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pruned, err := h.pruneGeneratedCombos(r.Context())
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"id":     AutoFreeComboID,
+		"models": models,
+		"pruned": pruned,
+	})
+}
+
+// freeTierComboModels returns "alias/model" ids for every free-tier registry
+// model of providers with at least one active connection, skipping models the
+// user disabled on the provider page, grouped by model family and ordered
+// newest version first inside each family (owner decision 4, cycle 9), with
+// the key as tie-break so regenerating yields a stable, diffable list.
+//
+// The free-tier marker is a naming convention, not a service kind: ":free" /
+// "/free" / "-free" also lands on embedding, image, tts and stt models
+// (openrouter's "nvidia/llama-nemotron-embed-vl-1b-v2:free" is one). The
+// registry carries the real kind, so a combo that cannot serve a chat turn
+// never enters the fallback chain — same gate usableModelFamilies applies to
+// the auto-family combos.
+func (h *DashboardHandler) freeTierComboModels(ctx context.Context) ([]string, error) {
+	conns, err := h.Repo.GetProviderConnections("", true)
+	if err != nil {
+		return nil, fmt.Errorf("freeTierComboModels: list connections: %w", err)
+	}
+	active := make(map[string]struct{}, len(conns))
+	for _, c := range conns {
+		if c.Provider != "" {
+			active[c.Provider] = struct{}{}
+		}
+	}
+	disabled, err := h.disabledModelsByAlias()
+	if err != nil {
+		return nil, fmt.Errorf("freeTierComboModels: disabled models: %w", err)
+	}
+
+	var out []string
+	for providerID := range active {
+		alias := providers.GetProviderAlias(providerID)
+		for _, modelID := range providers.GetProviderModels(providerID) {
+			if _, off := disabled[alias][modelID]; off {
+				continue
+			}
+			if !providers.IsFreeTierModel(modelID) {
+				continue
+			}
+			if kind := providers.GetProviderModelKind(providerID, modelID); kind != "" && kind != "llm" {
+				continue
+			}
+			out = append(out, alias+"/"+modelID)
+		}
+	}
+	sortFreeTierModels(out)
+	return out, nil
+}
+
+// comboModels extracts the model id array of a combo's stored models field,
+// accepting either the raw JSON string or an already-decoded array value.
+func comboModels(v any) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch m := v.(type) {
+	case string:
+		if strings.TrimSpace(m) == "" {
+			return nil, nil
+		}
+		var arr []string
+		if err := json.Unmarshal([]byte(m), &arr); err != nil {
+			return nil, fmt.Errorf("combo models not a JSON array: %w", err)
+		}
+		return arr, nil
+	case []string:
+		return m, nil
+	default:
+		b, err := json.Marshal(m)
+		if err != nil {
+			return nil, fmt.Errorf("combo models invalid: %w", err)
+		}
+		var arr []string
+		if err := json.Unmarshal(b, &arr); err != nil {
+			return nil, fmt.Errorf("combo models not a JSON array: %w", err)
+		}
+		return arr, nil
+	}
+}
+
+// HandleDeleteCombo handles DELETE /api/combos/{id}.
+func (h *DashboardHandler) HandleDeleteCombo(w http.ResponseWriter, r *http.Request) {
+	id := getURLParam(r, "id")
+	if id == "" {
+		handlerutil.WriteJSONError(w, http.StatusBadRequest, "missing combo id")
+		return
+	}
+
+	if err := h.Repo.DeleteCombo(id); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = h.Repo.DeleteKV(generatedCombosScope, id)
+
+	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+}
+
+// writeInvalidComboStrategy rejects a strategy the router does not implement,
+// instead of saving a value that would silently route as fallback.
+func writeInvalidComboStrategy(w http.ResponseWriter, strategy string) {
+	handlerutil.WriteJSONError(w, http.StatusBadRequest, fmt.Sprintf(
+		"estrategia de combo inválida %q: usá una de %s", strategy, strings.Join(db.ValidComboStrategies, ", ")))
+}

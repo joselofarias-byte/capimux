@@ -22,19 +22,22 @@ import (
 	"sync"
 	"time"
 
+	"9router/proxy/internal/daemon"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/shutdown"
+	"github.com/samber/lo"
 )
 
 // CurrentVersion is the active 9router-go application version.
 // Can be overridden at build time via -ldflags "-X 9router/proxy/internal/updater.CurrentVersion=1.8.8"
 // Default fallback is read from version.json at init if not overridden.
-var CurrentVersion = "1.8.9"
+var CurrentVersion = "1.9.6"
 
 // DefaultUpdateURL is the primary remote version manifest URL.
-var DefaultUpdateURL = "https://raw.githubusercontent.com/joselofarias-byte/9router-go/main/version.json"
+var DefaultUpdateURL = "https://raw.githubusercontent.com/luqman-v1/9router-go/main/version.json"
 
 // DefaultGitHubRepo is the repository for GitHub Releases API fallback.
-var DefaultGitHubRepo = "joselofarias-byte/9router-go"
+var DefaultGitHubRepo = "luqman-v1/9router-go"
 
 // DefaultCheckInterval is the periodic background update check interval (6 hours).
 const DefaultCheckInterval = 6 * time.Hour
@@ -145,10 +148,20 @@ func GetStatus() *UpdaterStatus {
 
 // CheckUpdate queries remote version sources (manifest or GitHub Releases API) and compares semver.
 func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
-	updateURL := os.Getenv("UPDATE_URL")
-	if updateURL == "" {
-		updateURL = DefaultUpdateURL
+	// 0. A build that pins a release signing key trusts only the signed
+	// manifest: no fallback to the unsigned sources below (GROK-004 / OPS-01).
+	if info, enforced, err := checkSignedUpdate(ctx); enforced {
+		if err != nil {
+			return nil, err
+		}
+		cacheMu.Lock()
+		cachedInfo = info
+		lastCheckTime = time.Now()
+		cacheMu.Unlock()
+		return info, nil
 	}
+
+	updateURL := canonicalUpdateURL(lo.CoalesceOrEmpty(os.Getenv("UPDATE_URL"), DefaultUpdateURL))
 
 	// 1. Try manifest URL first
 	info, err := checkManifest(ctx, updateURL)
@@ -161,10 +174,7 @@ func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	// 2. Fallback to GitHub Releases API
-	repo := os.Getenv("UPDATE_REPO")
-	if repo == "" {
-		repo = DefaultGitHubRepo
-	}
+	repo := canonicalUpdateRepo(lo.CoalesceOrEmpty(os.Getenv("UPDATE_REPO"), DefaultGitHubRepo))
 	ghURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	log.Debug("updater", "checking github releases fallback", "repo", repo)
 
@@ -178,18 +188,21 @@ func CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("check update failed: manifest error (%v), github releases error (%v)", err, ghErr)
+		return nil, fmt.Errorf("check update failed: manifest error (%w), github releases error (%w)", err, ghErr)
 	}
 	return nil, ghErr
 }
 
 func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
+	return checkManifestWithClient(ctx, url, &http.Client{Timeout: 10 * time.Second})
+}
+
+func checkManifestWithClient(ctx context.Context, url string, client *http.Client) (*UpdateInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -212,6 +225,11 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 		DownloadURLs  map[string]string `json:"downloadUrls"`
 		ReleaseNotes  string            `json:"releaseNotes"`
 		SHA256        string            `json:"sha256"`
+		// SHA256s carries one digest per platform key (e.g. "linux_arm64"),
+		// matching downloadUrls. A single top-level sha256 cannot describe
+		// several platform binaries, so with mandatory verification every
+		// platform but one would be refused.
+		SHA256s map[string]string `json:"sha256s"`
 	}
 	if err := json.Unmarshal(body, &remote); err != nil {
 		return nil, err
@@ -227,7 +245,14 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 
 	latestVersion := strings.TrimPrefix(versionStr, "v")
 	current := strings.TrimPrefix(CurrentVersion, "v")
-	hasUpdate := CompareVersions(latestVersion, current) > 0
+	comparison := CompareVersions(latestVersion, current)
+	hasUpdate := comparison > 0
+	// A fork/dev build can legitimately be ahead of the published manifest.
+	// Never describe an older remote version as "Latest version"; that made
+	// 1.9.6-fabric print "Latest version: 1.8.9" while also saying up to date.
+	if comparison < 0 {
+		latestVersion = current
+	}
 
 	platformKey := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 	downloadURL := ""
@@ -240,6 +265,14 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 	if downloadURL == "" {
 		downloadURL = remote.DownloadURL
 	}
+	expectedSHA := remote.SHA256
+	if remote.SHA256s != nil {
+		if v := remote.SHA256s[platformKey]; v != "" {
+			expectedSHA = v
+		} else if v := remote.SHA256s["default"]; v != "" {
+			expectedSHA = v
+		}
+	}
 
 	return &UpdateInfo{
 		CurrentVersion: CurrentVersion,
@@ -251,7 +284,7 @@ func checkManifest(ctx context.Context, url string) (*UpdateInfo, error) {
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 		CheckedAt:      time.Now().UTC().Format(time.RFC3339),
-		SHA256:         remote.SHA256,
+		SHA256:         expectedSHA,
 		Source:         "manifest",
 	}, nil
 }
@@ -271,6 +304,20 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		// releases/latest is 404 while a repository has no published
+		// release. That is "nothing to install", not a failed check.
+		log.Debug("updater", "no published release", "url", apiURL)
+		return &UpdateInfo{
+			CurrentVersion: CurrentVersion,
+			LatestVersion:  strings.TrimPrefix(CurrentVersion, "v"),
+			GoVersion:      runtime.Version(),
+			OS:             runtime.GOOS,
+			Arch:           runtime.GOARCH,
+			CheckedAt:      time.Now().UTC().Format(time.RFC3339),
+			Source:         "github_releases",
+		}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github releases HTTP %d", resp.StatusCode)
 	}
@@ -282,18 +329,38 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 		Assets  []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
+			// Digest is GitHub's own "sha256:<hex>" of the uploaded asset.
+			Digest string `json:"digest"`
 		} `json:"assets"`
 	}
 
 	if err := json.UnmarshalRead(resp.Body, &release); err != nil {
 		return nil, err
 	}
+	matchable := make([]struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	}, len(release.Assets))
+	for i, a := range release.Assets {
+		matchable[i].Name, matchable[i].BrowserDownloadURL = a.Name, a.BrowserDownloadURL
+	}
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	current := strings.TrimPrefix(CurrentVersion, "v")
-	hasUpdate := CompareVersions(latestVersion, current) > 0
+	comparison := CompareVersions(latestVersion, current)
+	hasUpdate := comparison > 0
+	if comparison < 0 {
+		latestVersion = current
+	}
 
-	downloadURL := matchReleaseAsset(release.Assets, runtime.GOOS, runtime.GOARCH)
+	downloadURL := matchReleaseAsset(matchable, runtime.GOOS, runtime.GOARCH)
+	assetSHA := ""
+	for _, a := range release.Assets {
+		if a.BrowserDownloadURL == downloadURL && strings.HasPrefix(strings.ToLower(a.Digest), "sha256:") {
+			assetSHA = strings.ToLower(strings.TrimPrefix(strings.ToLower(a.Digest), "sha256:"))
+			break
+		}
+	}
 
 	return &UpdateInfo{
 		CurrentVersion: CurrentVersion,
@@ -305,6 +372,7 @@ func checkGitHubReleases(ctx context.Context, apiURL string) (*UpdateInfo, error
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 		CheckedAt:      time.Now().UTC().Format(time.RFC3339),
+		SHA256:         assetSHA,
 		Source:         "github_releases",
 	}, nil
 }
@@ -356,11 +424,14 @@ func matchReleaseAsset(assets []struct {
 }
 
 // PerformSelfUpdate downloads, decompresses (tar.gz/zip if needed), verifies, and safely replaces the active binary.
-// When expectedSHA256 is non-empty, the downloaded asset (after archive extraction) is verified against it before
-// the binary is written to disk; a mismatch aborts the update and keeps the running binary intact.
+// A valid SHA-256 digest is mandatory. The extracted executable is verified before
+// modifying the installed binary; without a digest the update is rejected.
 func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	if downloadURL == "" {
 		return fmt.Errorf("missing download URL for platform %s_%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if err := validateUpdateSHA256(expectedSHA256); err != nil {
+		return err
 	}
 
 	updateProgressMu.Lock()
@@ -404,20 +475,15 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 		return fmt.Errorf("read downloaded asset: %w", err)
 	}
 
-	// Extract executable bytes from archive or raw binary
-	binaryBytes, err := extractExecutableBytes(rawBytes, downloadURL)
+	binaryBytes, archiveVerified, err := verifyDownloadedUpdate(rawBytes, downloadURL, expectedSHA256)
 	if err != nil {
-		return fmt.Errorf("extract executable: %w", err)
+		return err
 	}
-
-	// Verify SHA256 checksum when the manifest provides one
-	if expectedSHA256 != "" {
-		actualSHA := ComputeSHA256(binaryBytes)
-		if !strings.EqualFold(actualSHA, expectedSHA256) {
-			return fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA256, actualSHA)
-		}
-		log.Info("updater", "SHA256 checksum verified", "sha256", actualSHA)
+	verifiedOn := "extracted binary"
+	if archiveVerified {
+		verifiedOn = "downloaded file"
 	}
+	log.Info("updater", "SHA256 checksum verified", "sha256", expectedSHA256, "verified_on", verifiedOn)
 
 	// Create temporary binary file in the target directory
 	dir := filepath.Dir(execPath)
@@ -456,6 +522,29 @@ func PerformSelfUpdate(downloadURL, expectedSHA256 string) error {
 	_ = os.Remove(oldPath)
 	log.Info("updater", "self-update applied successfully!", "binary", execPath)
 	return nil
+}
+
+// verifyDownloadedUpdate returns the executable to install only when
+// expectedSHA256 is a valid digest of either the downloaded asset (GitHub's
+// asset digest or a published archive checksum) or the executable extracted
+// from it (the manifest contract). The downloaded bytes are checked first so
+// that, when the digest describes the archive, only a verified archive is
+// parsed. A missing, malformed or mismatched checksum never yields bytes.
+func verifyDownloadedUpdate(rawBytes []byte, downloadURL, expectedSHA256 string) ([]byte, bool, error) {
+	if err := validateUpdateSHA256(expectedSHA256); err != nil {
+		return nil, false, err
+	}
+	archiveVerified := verifyUpdateBinarySHA256(rawBytes, expectedSHA256) == nil
+	binaryBytes, err := extractExecutableBytes(rawBytes, downloadURL)
+	if err != nil {
+		return nil, false, fmt.Errorf("extract executable: %w", err)
+	}
+	if !archiveVerified {
+		if err := verifyUpdateBinarySHA256(binaryBytes, expectedSHA256); err != nil {
+			return nil, false, err
+		}
+	}
+	return binaryBytes, archiveVerified, nil
 }
 
 // extractExecutableBytes handles .tar.gz, .zip, and raw binaries.
@@ -695,7 +784,13 @@ func runCheckCycle(ctx context.Context) {
 	}
 }
 
-// RestartSelf safely spawns a fresh process of the updated executable and exits current instance.
+// RestartSelf replaces this process with a fresh one running the updated
+// binary.
+//
+// The replacement is spawned from the after-stop hook rather than here: this
+// process still holds the listening socket, and a child that starts a moment
+// earlier races it for the port. main runs the hook once fxApp.Stop has closed
+// the listener, so the new process always finds the port free.
 func RestartSelf() {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -709,32 +804,41 @@ func RestartSelf() {
 		return
 	}
 
-	cmd := exec.Command(execPath, os.Args[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	cmd.Env = os.Environ()
+	spawn := func() {
+		cmd := exec.Command(execPath, restartArgs()...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		cmd.Env = os.Environ()
 
-	if err := cmd.Start(); err != nil {
-		log.Error("updater", "spawn updated process failed", "error", err)
-		return
+		if err := cmd.Start(); err != nil {
+			log.Error("updater", "spawn updated process failed", "error", err)
+			os.Exit(1)
+		}
+
+		log.Info("updater", "replacement process started, old instance exiting", "pid", cmd.Process.Pid)
+		// Release the handle so the child is never killed with this process
+		// (Windows job control) and does not stay a zombie on POSIX.
+		_ = cmd.Process.Release()
+		os.Exit(0)
 	}
 
-	log.Info("updater", "spawned updated process, shutting down old instance", "pid", cmd.Process.Pid)
+	shutdown.RestartAfterStop(spawn)
+}
 
-	// Signal our own process to shut down gracefully instead of os.Exit(0):
-	// main's signal handler drains in-flight SSE streams and closes the listener
-	// before exiting, so the spawned process can bind the same port without
-	// "address already in use". If we are not the process leader or the signal
-	// path is unavailable (e.g. Windows), fall back to os.Exit(0).
-	if signalSelfShutdown() {
-		// Give main a bounded window to complete graceful shutdown; if it does
-		// not exit in time, force-quit so the new process can take over.
-		time.AfterFunc(5*time.Second, func() { os.Exit(1) })
-		select {}
+// restartArgs drops the background flag: the replacement process is the
+// daemon already, and re-honouring the flag would make it spawn another one.
+func restartArgs() []string {
+	out := make([]string, 0, len(os.Args))
+	for _, a := range os.Args[1:] {
+		if a == daemon.BackgroundFlag || a == daemon.BackgroundAlias ||
+			strings.HasPrefix(a, daemon.BackgroundFlag+"=") ||
+			strings.HasPrefix(a, daemon.BackgroundAlias+"=") {
+			continue
+		}
+		out = append(out, a)
 	}
-
-	os.Exit(0)
+	return out
 }
 
 // CompareVersions compares two semver strings (v1 > v2 -> 1, v1 < v2 -> -1, v1 == v2 -> 0).

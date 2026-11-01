@@ -1,7 +1,24 @@
 package providers
 
+import "strings"
+
 // ProviderAliasMap maps short aliases to canonical provider IDs.
 var ProviderAliasMap = map[string]string{
+	"gguf":         "llamacpp",
+	"lc":           "llamacpp",
+	"llama":        "llamacpp",
+	"llama-cpp":    "llamacpp",
+	"llama-server": "llamacpp",
+	"llama.cpp":    "llamacpp",
+
+	"b-ai":           "bai",
+	"explabs":        "experiential",
+	"experiential-labs": "experiential",
+	"agnes-ai":       "agnes",
+	"atria-asi":      "atria",
+	"dahl-inference": "dahl",
+	"thh":            "tokenharbor",
+	"th":             "tokenharbor",
 	"aai":            "assemblyai",
 	"ag":             "antigravity",
 	"ali":            "alicode",
@@ -30,6 +47,7 @@ var ProviderAliasMap = map[string]string{
 	"ds":             "deepseek",
 	"el":             "elevenlabs",
 	"fal":            "fal-ai",
+	"fb":             "freebuff",
 	"fish":           "fish-audio",
 	"fl":             "featherless",
 	"fw":             "fireworks",
@@ -53,12 +71,17 @@ var ProviderAliasMap = map[string]string{
 	"mimo":           "xiaomi-mimo",
 	"mm":             "minimax",
 	"mmf":            "mimo-free",
+	"muse-ai":           "muse",
+	"meta-model-api":    "muse",
+	"muse-code":         "muse",
+	"muse-subscription": "muse",
+	"systemone":         "v1m",
 	"nb":             "nanobanana",
 	"ne":             "nebius",
 	"nv":             "nvidia",
 	"oa":             "openai",
 	"oc":             "opencode",
-	"ocg":            "opencode-go",
+	"ocz":            "opencode-zen",
 	"or":             "openrouter",
 	"pa":             "perplexity-agent",
 	"polly":          "aws-polly",
@@ -66,25 +89,32 @@ var ProviderAliasMap = map[string]string{
 	"pplx-agent":     "perplexity-agent",
 	"pplx-responses": "perplexity-agent",
 	"pw":             "perplexity-web",
+	"workbuddy":      "codebuddy-intl",
+	"wb":             "codebuddy-intl",
+	"ocg":            "opencode-go",
 	"qd":             "qoder",
+	"qdcn":           "qoder-cn",
 	"runway":         "runwayml",
 	"stability":      "stability-ai",
 	"tg":             "together",
 	"vali":           "volcengine-ark",
 	"vercel":         "vercel-ai-gateway",
 	"vn":             "venice",
-	"wb":             "codebuddy-intl",
-	"workbuddy":      "codebuddy-intl",
 	"xmtp":           "xiaomi-tokenplan",
 	"af":             "api-airforce",
 	"bzl":            "bazaarlink",
 	"bm":             "bluesminds",
+	"cbcn":           "codebuddy-cn",
 	"dv":             "devin-cli",
 	"hunyuan":        "tencent",
 	"kgw":            "kilo-gateway",
+	"ps":             "poolside",
 	"qianfan":        "baidu",
 	"samba":          "sambanova",
 	"tr":             "trae",
+	"voyage":         "voyage-ai",
+	"vx":             "vertex",
+	"vxp":            "vertex-partner",
 	"ws":             "windsurf",
 	"xq":             "xquik",
 	"zd":             "zed",
@@ -92,8 +122,34 @@ var ProviderAliasMap = map[string]string{
 
 // ResolveAlias returns the canonical provider ID for an alias, or the alias itself if not found.
 func ResolveAlias(alias string) string {
-	if canonical, ok := ProviderAliasMap[alias]; ok {
+	if canonical, ok := ProviderAliasMap[strings.ToLower(strings.TrimSpace(alias))]; ok {
 		return canonical
 	}
 	return alias
+}
+
+// IsNoAuthProvider reports whether a provider is marked noAuth in the registry,
+// i.e. it is usable without any configured credential. Aliases resolve to their
+// canonical id first, so callers may pass either form.
+func IsNoAuthProvider(providerID string) bool {
+	canon := ResolveAlias(providerID)
+	if cfg, ok := KnownProviders[canon]; ok {
+		return cfg.NoAuth
+	}
+	return false
+}
+
+// GetProviderAlias returns the alias upstream publishes a provider under, ported
+// from the registry's uiAlias/alias. Providers without a registry alias are
+// published under their id (clinepass, nvidia, openrouter, openai) — exactly
+// like upstream getProviderAlias: AI_PROVIDERS[id]?.alias || id.
+//
+// ProviderAliasMap stays the alias -> canonical id table used when RESOLVING
+// incoming model ids (cp/* still routes to clinepass), so removing the old
+// first-wins inverse here only changes the published prefix.
+func GetProviderAlias(providerID string) string {
+	if alias, ok := RegistryAliases[providerID]; ok && alias != "" {
+		return alias
+	}
+	return providerID
 }

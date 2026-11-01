@@ -76,18 +76,27 @@ func (r *Repo) GetProxyPool(poolID string) (*ProxyPool, error) {
 	}
 
 	if cached, ok := proxyPoolCache.Load(poolID); ok {
-		old := cached.(*ProxyPool)
-		if sameProxyPoolConfig(old, pool) {
-			return old, nil
+		if old, ok := cached.(*ProxyPool); ok {
+			if sameProxyPoolConfig(old, pool) {
+				return old, nil
+			}
+			// The row changed under the cache (another process sharing the DB,
+			// or a write that bypassed the Repo invalidation). Publish a fresh
+			// immutable object and keep the round-robin cursor. A stale cache
+			// could keep a pool non-strict after strictProxy was turned on.
+			atomic.StoreUint64(&pool.index, atomic.LoadUint64(&old.index))
+			proxyPoolCache.Store(poolID, pool)
+			return pool, nil
 		}
-		// Configuration changed in the shared DB. Publish a fresh immutable
-		// object while preserving the round-robin cursor for continuity.
-		atomic.StoreUint64(&pool.index, atomic.LoadUint64(&old.index))
-		proxyPoolCache.Store(poolID, pool)
+	}
+	// Store the freshly-read pool. If another goroutine won the race, return
+	// its value instead of overwriting — never mutate a value in the cache,
+	// since concurrent readers use it lock-free via NextURL.
+	actual, _ := proxyPoolCache.LoadOrStore(poolID, pool)
+	if pool, ok := actual.(*ProxyPool); ok {
 		return pool, nil
 	}
-	actual, _ := proxyPoolCache.LoadOrStore(poolID, pool)
-	return actual.(*ProxyPool), nil
+	return pool, nil
 }
 
 func sameProxyPoolConfig(a, b *ProxyPool) bool {
@@ -112,6 +121,8 @@ func (p *ProxyPool) NextURL() string {
 	if len(p.URLs) == 0 {
 		return ""
 	}
+	// AddUint64 returns the incremented value; subtract one so the first call
+	// uses URLs[0] and the rotation does not skip the first configured proxy.
 	idx := atomic.AddUint64(&p.index, 1) - 1
 	return p.URLs[idx%uint64(len(p.URLs))]
 }
@@ -168,4 +179,106 @@ func randomID() string {
 		return fmt.Sprintf("pool-%d", time.Now().UnixNano())
 	}
 	return fmt.Sprintf("%x", b)
+}
+
+// ListProxyPools returns all proxy pools with their data unpacked.
+func (r *Repo) ListProxyPools() ([]map[string]any, error) {
+	rows, err := r.db.Query(`SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools ORDER BY createdAt DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []map[string]any
+	for rows.Next() {
+		var id, testStatus, dataStr, createdAt, updatedAt string
+		var isActiveInt int
+		if err := rows.Scan(&id, &isActiveInt, &testStatus, &dataStr, &createdAt, &updatedAt); err != nil {
+			continue
+		}
+		var poolData map[string]any
+		if err := json.Unmarshal([]byte(dataStr), &poolData); err != nil {
+			poolData = make(map[string]any)
+		}
+		poolData["id"] = id
+		poolData["isActive"] = (isActiveInt == 1)
+		poolData["testStatus"] = testStatus
+		poolData["createdAt"] = createdAt
+		poolData["updatedAt"] = updatedAt
+		list = append(list, poolData)
+	}
+	if list == nil {
+		list = []map[string]any{}
+	}
+	return list, nil
+}
+
+// DeleteProxyPool removes a proxy pool by id.
+func (r *Repo) DeleteProxyPool(id string) error {
+	_, err := r.db.Exec(`DELETE FROM proxyPools WHERE id = ?`, id)
+	proxyPoolCache.Delete(id)
+	return err
+}
+
+// UpdateProxyPool updates a proxy pool's data, isActive, and testStatus.
+func (r *Repo) UpdateProxyPool(id string, updates map[string]any) error {
+	var dataStr string
+	var isActive int
+	var testStatus string
+	err := r.db.QueryRow(`SELECT data, isActive, testStatus FROM proxyPools WHERE id = ?`, id).Scan(&dataStr, &isActive, &testStatus)
+	if err != nil {
+		return err
+	}
+	var existing map[string]any
+	_ = json.Unmarshal([]byte(dataStr), &existing)
+	if existing == nil {
+		existing = make(map[string]any)
+	}
+	for k, v := range updates {
+		if k == "isActive" {
+			if b, ok := v.(bool); ok {
+				if b {
+					isActive = 1
+				} else {
+					isActive = 0
+				}
+			}
+		} else if k == "testStatus" {
+			if s, ok := v.(string); ok {
+				testStatus = s
+			}
+		} else if k != "id" && k != "createdAt" && k != "updatedAt" {
+			existing[k] = v
+		}
+	}
+	updatedBytes, _ := json.Marshal(existing)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = r.db.Exec(`UPDATE proxyPools SET data = ?, isActive = ?, testStatus = ?, updatedAt = ? WHERE id = ?`,
+		string(updatedBytes), isActive, testStatus, now, id)
+	proxyPoolCache.Delete(id)
+	return err
+}
+
+// SetProxyPoolStatus updates only testStatus and lastTestedAt on a pool.
+func (r *Repo) SetProxyPoolStatus(id string, status string, latencyMs int64) error {
+	var dataStr string
+	var isActive int
+	var currentStatus string
+	err := r.db.QueryRow(`SELECT data, isActive, testStatus FROM proxyPools WHERE id = ?`, id).Scan(&dataStr, &isActive, &currentStatus)
+	if err != nil {
+		return err
+	}
+	var existing map[string]any
+	_ = json.Unmarshal([]byte(dataStr), &existing)
+	if existing == nil {
+		existing = make(map[string]any)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	existing["lastTestedAt"] = now
+	existing["latency"] = latencyMs
+	updatedBytes, _ := json.Marshal(existing)
+	_, err = r.db.Exec(`UPDATE proxyPools SET data = ?, testStatus = ?, updatedAt = ? WHERE id = ?`,
+		string(updatedBytes), status, now, id)
+	proxyPoolCache.Delete(id)
+	return err
 }

@@ -10,7 +10,7 @@ import (
 	"9router/proxy/internal/log"
 )
 
-// Legacy compatibility for Data Plane -> Control Plane transition.
+// Legacy compatibility for Data Plane -> Control Plane transition
 // In production, TrustManager should be global and stateful.
 var globalTrustManager = trust.NewManager()
 var globalRoutingEngine = &routing.Engine{TrustManager: globalTrustManager}
@@ -24,10 +24,13 @@ func getActiveCandidates(ctx context.Context, db *sql.DB, model string) []routin
 // Passing model="" lets the policy select across all discovered models.
 func getPolicyCandidates(ctx context.Context, db *sql.DB, model string, policy routing.Policy) []routing.RouteNode {
 	if db != nil {
-		// Sync is safely called on every request because it internally uses a cheap
-		// generation-based check preventing full queries/locks when accounts did not change.
+		// Sync is safely called on every request because it internally
+		// uses a cheap generation-based check preventing full queries/locks
+		// when no account mutations have occurred.
 		err := cpsync.SyncAccountsFromDB(db)
 		if err != nil {
+			// If sync fails, do not route using potentially stale Control Plane state.
+			// Return nil to force fallback to the legacy Data Plane DB lookup path.
 			log.Error("routing", "control plane sync failed, aborting cp candidates", "error", err)
 			return nil
 		}

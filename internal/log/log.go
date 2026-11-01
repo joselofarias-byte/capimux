@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +49,22 @@ var (
 	consoleNext int
 )
 
+// ansiSGR matches ANSI SGR escape sequences emitted when logging to a terminal.
+var ansiSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// stripANSI removes ANSI color codes so terminal escape sequences do not leak
+// into the dashboard console viewer. Mirrors the Next consoleLogBuffer.
+func stripANSI(line string) string {
+	if !strings.Contains(line, "\x1b[") {
+		return line
+	}
+	return ansiSGR.ReplaceAllString(line, "")
+}
+
 // captureConsole appends a formatted line to the ring buffer and fans it out
 // to live subscribers without blocking the logger.
-func captureConsole(line string) {
+func captureConsole(raw string) {
+	line := stripANSI(raw)
 	consoleMu.Lock()
 	consoleLogs = append(consoleLogs, line)
 	if len(consoleLogs) > consoleMaxLines {
@@ -179,6 +193,32 @@ func SetLevel(l Level) {
 	currentLevel = l
 }
 
+// GetLevel returns the current log level.
+func GetLevel() Level {
+	levelMu.RLock()
+	defer levelMu.RUnlock()
+	return currentLevel
+}
+
+// LevelString returns the lowercase name of the current log level
+// ("debug", "info", "warn", or "error").
+func LevelString() string {
+	lvl := GetLevel()
+	for name, l := range levelNames {
+		if l == lvl {
+			return name
+		}
+	}
+	return "info"
+}
+
+// ParseLevel parses a log level name (case-insensitive, surrounding
+// whitespace tolerated). It reports false for unknown names.
+func ParseLevel(s string) (Level, bool) {
+	l, ok := levelNames[strings.ToLower(strings.TrimSpace(s))]
+	return l, ok
+}
+
 // SetJSONFormat toggles JSON vs Text log format.
 func SetJSONFormat(enable bool) {
 	levelMu.Lock()
@@ -274,6 +314,15 @@ func outputCtx(ctx context.Context, l Level, tag, msg string, kv ...any) {
 }
 
 func output(l Level, tag, msg string, kv ...any) {
+	msg = RedactString(msg)
+	if len(kv) > 0 {
+		red := make([]any, len(kv))
+		copy(red, kv)
+		for i := 1; i < len(red); i += 2 {
+			red[i] = redactValue(fmt.Sprint(red[i-1]), red[i])
+		}
+		kv = red
+	}
 	levelMu.RLock()
 	jsonMode := isJSONFormat
 	levelMu.RUnlock()

@@ -3,40 +3,62 @@ package discovery
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"path/filepath"
+	"os"
 	"testing"
 	"time"
 
 	"9router/proxy/internal/controlplane/registry"
-	cpsync "9router/proxy/internal/controlplane/sync"
+
 	_ "modernc.org/sqlite"
 )
 
-type mutableDiscoveryAdapter struct {
-	id         string
-	candidates []Candidate
-	err        error
+type scriptedAdapter struct {
+	id     string
+	scope  []string
+	rounds [][]Candidate
+	err    error
+	calls  int
 }
 
-func (a *mutableDiscoveryAdapter) SourceID() string { return a.id }
+func (a *scriptedAdapter) SourceID() string { return a.id }
 
-func (a *mutableDiscoveryAdapter) Discover(context.Context) ([]Candidate, error) {
-	if a.err != nil {
+func (a *scriptedAdapter) ScopedProviderIDs() []string { return a.scope }
+
+func (a *scriptedAdapter) Discover(ctx context.Context) ([]Candidate, error) {
+	if a.err != nil && a.calls >= len(a.rounds) {
+		a.calls++
 		return nil, a.err
 	}
-	return append([]Candidate(nil), a.candidates...), nil
+	idx := a.calls
+	a.calls++
+	if idx >= len(a.rounds) {
+		idx = len(a.rounds) - 1
+	}
+	out := make([]Candidate, len(a.rounds[idx]))
+	copy(out, a.rounds[idx])
+	return out, nil
 }
 
-func setupOrchestratorDB(t *testing.T) *sql.DB {
+func openDiscoveryDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orchestrator.db"))
+	path := t.TempDir() + "/discovery.db"
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { database.Close() })
-
-	if _, err := database.Exec(`
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`
+		CREATE TABLE providerConnections (
+			id TEXT PRIMARY KEY,
+			provider TEXT NOT NULL,
+			authType TEXT NOT NULL,
+			isActive INTEGER DEFAULT 1,
+			data TEXT NOT NULL,
+			createdAt TEXT NOT NULL,
+			updatedAt TEXT NOT NULL
+		);
+		CREATE TABLE controlplane_meta (key TEXT PRIMARY KEY, val INTEGER NOT NULL);
+		INSERT INTO controlplane_meta (key, val) VALUES ('accounts_generation', 1);
 		CREATE TABLE registry_snapshots (
 			version TEXT PRIMARY KEY,
 			created_at TEXT NOT NULL,
@@ -45,198 +67,163 @@ func setupOrchestratorDB(t *testing.T) *sql.DB {
 			status TEXT NOT NULL,
 			payload TEXT NOT NULL
 		);
-		CREATE TABLE providerConnections (
-			id TEXT PRIMARY KEY,
-			provider TEXT NOT NULL,
-			isActive INTEGER NOT NULL,
-			createdAt TEXT NOT NULL,
-			updatedAt TEXT NOT NULL
-		);
-		CREATE TABLE controlplane_meta (
-			key TEXT PRIMARY KEY,
-			val INTEGER NOT NULL
-		);
-		INSERT INTO controlplane_meta (key, val) VALUES ('accounts_generation', 900000);
 	`); err != nil {
-		t.Fatalf("create orchestrator tables: %v", err)
+		t.Fatalf("schema: %v", err)
 	}
-	if err := registry.InitRegistry(database); err != nil {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO providerConnections (id, provider, authType, isActive, data, createdAt, updatedAt) VALUES (?, ?, ?, 1, '{}', ?, ?)`,
+		"conn-cline", "cline", "bearer", now, now); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	if err := registry.InitRegistry(db); err != nil {
 		t.Fatalf("init registry: %v", err)
 	}
-	return database
+	return db
 }
 
-func TestOrchestratorRefreshesMutableOfferMetadataAndRetiresMissingOffers(t *testing.T) {
-	database := setupOrchestratorDB(t)
-	adapter := &mutableDiscoveryAdapter{
-		id: "test-source",
-		candidates: []Candidate{{
-			ProviderID:    "orcarouter",
-			ModelID:       "model-a",
-			UpstreamModel: "model-a",
-			PricingMode:   "free_tier",
-			CostMetadata:  `{"prompt":0}`,
-			Capabilities:  `{"vision":false}`,
+func modelPricing(t *testing.T, provider, model string) (string, bool) {
+	t.Helper()
+	state := registry.GetActiveState()
+	pm := state.ProviderModels[provider][model]
+	if pm == nil {
+		t.Fatalf("missing %s/%s", provider, model)
+	}
+	return pm.PricingMode, pm.IsActive
+}
+
+func TestOrchestrator_ReclassificationAndDisappearance(t *testing.T) {
+	db := openDiscoveryDB(t)
+	adapter := &scriptedAdapter{
+		id:    "cline-free",
+		scope: []string{"cline"},
+		rounds: [][]Candidate{
+			{
+				{ProviderID: "cline", ModelID: "still-free", PricingMode: "free", UpstreamModel: "still-free"},
+				{ProviderID: "cline", ModelID: "was-free", PricingMode: "free", UpstreamModel: "was-free"},
+			},
+			{
+				{ProviderID: "cline", ModelID: "still-free", PricingMode: "free", UpstreamModel: "still-free"},
+				{ProviderID: "cline", ModelID: "was-free", PricingMode: "paid", UpstreamModel: "was-free"},
+			},
+			{
+				{ProviderID: "cline", ModelID: "still-free", PricingMode: "free", UpstreamModel: "still-free-v2"},
+			},
+			{},
+		},
+	}
+	orch := NewOrchestrator(db, []Adapter{adapter})
+
+	orch.RunSync(context.Background())
+	if mode, active := modelPricing(t, "cline", "was-free"); mode != "free" || !active {
+		t.Fatalf("initial classification = %s active=%v", mode, active)
+	}
+
+	orch.RunSync(context.Background())
+	if mode, active := modelPricing(t, "cline", "was-free"); mode != "paid" || !active {
+		t.Fatalf("reclassified model = %s active=%v, want paid and active", mode, active)
+	}
+
+	orch.RunSync(context.Background())
+	if _, active := modelPricing(t, "cline", "was-free"); active {
+		t.Fatal("model removed from the free catalog stayed active")
+	}
+	pm := registry.GetActiveState().ProviderModels["cline"]["still-free"]
+	if pm.UpstreamModel != "still-free-v2" || pm.PricingMode != "free" || !pm.IsActive {
+		t.Fatalf("remaining free model was not refreshed: %+v", pm)
+	}
+
+	orch.RunSync(context.Background())
+	if _, active := modelPricing(t, "cline", "still-free"); active {
+		t.Fatal("empty catalog left a stale free model active")
+	}
+}
+
+func TestOrchestrator_UnknownDoesNotClobberConcretePricing(t *testing.T) {
+	db := openDiscoveryDB(t)
+	cline := &scriptedAdapter{
+		id:    "cline-free",
+		scope: []string{"cline"},
+		rounds: [][]Candidate{{
+			{ProviderID: "cline", ModelID: "shared", PricingMode: "free", UpstreamModel: "shared"},
 		}},
 	}
-	orchestrator := NewOrchestrator(database, []Adapter{adapter})
-
-	orchestrator.RunSync(context.Background())
-	state := registry.GetActiveState()
-	pm := state.ProviderModels["orcarouter"]["model-a"]
-	if pm == nil || !pm.IsActive || pm.PricingMode != "free_tier" {
-		t.Fatalf("expected initial active free offer, got %#v", pm)
-	}
-
-	adapter.candidates[0].UpstreamModel = "model-a-v2"
-	adapter.candidates[0].PricingMode = "paid"
-	adapter.candidates[0].CostMetadata = `{"prompt":0.01}`
-	adapter.candidates[0].Capabilities = `{"vision":true}`
-	orchestrator.RunSync(context.Background())
-
-	state = registry.GetActiveState()
-	pm = state.ProviderModels["orcarouter"]["model-a"]
-	if pm == nil {
-		t.Fatal("updated offer missing")
-	}
-	if pm.PricingMode != "paid" {
-		t.Fatalf("expected refreshed paid pricing, got %q", pm.PricingMode)
-	}
-	if pm.UpstreamModel != "model-a-v2" {
-		t.Fatalf("expected refreshed upstream model, got %q", pm.UpstreamModel)
-	}
-	if pm.CostMetadata != `{"prompt":0.01}` || pm.Capabilities != `{"vision":true}` {
-		t.Fatalf("expected refreshed metadata, got cost=%q caps=%q", pm.CostMetadata, pm.Capabilities)
-	}
-	if !pm.IsActive {
-		t.Fatal("refreshed offer should remain active")
-	}
-
-	adapter.candidates = nil
-	orchestrator.RunSync(context.Background())
-
-	state = registry.GetActiveState()
-	pm = state.ProviderModels["orcarouter"]["model-a"]
-	if pm == nil {
-		t.Fatal("retired offer should remain explainable in registry")
-	}
-	if pm.IsActive {
-		t.Fatal("offer missing from a fully successful discovery pass should be inactive")
-	}
-}
-
-func TestOrchestratorPreservesUnseenOffersWhenAdapterFails(t *testing.T) {
-	database := setupOrchestratorDB(t)
-	adapter := &mutableDiscoveryAdapter{
-		id: "test-source",
-		candidates: []Candidate{{
-			ProviderID:    "orcarouter",
-			ModelID:       "model-a",
-			UpstreamModel: "model-a",
-			PricingMode:   "free_tier",
-			Capabilities:  "{}",
+	modelsDev := &scriptedAdapter{
+		id: "models.dev",
+		rounds: [][]Candidate{{
+			{ProviderID: "cline", ModelID: "shared", PricingMode: "unknown", UpstreamModel: "shared"},
+			{ProviderID: "cline", ModelID: "only-dev", PricingMode: "unknown", UpstreamModel: "only-dev"},
 		}},
 	}
-	orchestrator := NewOrchestrator(database, []Adapter{adapter})
-	orchestrator.RunSync(context.Background())
+	NewOrchestrator(db, []Adapter{cline, modelsDev}).RunSync(context.Background())
 
-	adapter.candidates = nil
-	adapter.err = errors.New("temporary catalog outage")
-	orchestrator.RunSync(context.Background())
-
-	state := registry.GetActiveState()
-	pm := state.ProviderModels["orcarouter"]["model-a"]
-	if pm == nil || !pm.IsActive {
-		t.Fatalf("failed adapter must preserve last known offer, got %#v", pm)
+	if mode, active := modelPricing(t, "cline", "shared"); mode != "free" || !active {
+		t.Fatalf("models.dev unknown clobbered free classification: %s active=%v", mode, active)
 	}
-	if pm.PricingMode != "free_tier" {
-		t.Fatalf("failed adapter unexpectedly changed pricing: %q", pm.PricingMode)
+	if mode, _ := modelPricing(t, "cline", "only-dev"); mode != "unknown" {
+		t.Fatalf("models.dev model = %s, want unknown", mode)
 	}
 }
 
-
-type blockingDiscoveryAdapter struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func (a *blockingDiscoveryAdapter) SourceID() string { return "blocking-source" }
-
-func (a *blockingDiscoveryAdapter) Discover(ctx context.Context) ([]Candidate, error) {
-	close(a.started)
-	select {
-	case <-a.release:
-		return []Candidate{{
-			ProviderID:    "orcarouter",
-			ModelID:       "model-race",
-			UpstreamModel: "model-race",
-			PricingMode:   "free_tier",
-			Capabilities:  "{}",
-		}}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+func TestOrchestrator_SameSourceUnknownReplacesFree(t *testing.T) {
+	db := openDiscoveryDB(t)
+	adapter := &scriptedAdapter{
+		id:    "unorouter",
+		scope: []string{"unorouter"},
+		rounds: [][]Candidate{
+			{{ProviderID: "unorouter", ModelID: "gpt-4o:free", PricingMode: "free", UpstreamModel: "gpt-4o:free"}},
+			{{ProviderID: "unorouter", ModelID: "gpt-4o:free", PricingMode: "unknown", UpstreamModel: "gpt-4o:free"}},
+		},
+	}
+	orch := NewOrchestrator(db, []Adapter{adapter})
+	orch.RunSync(context.Background())
+	orch.RunSync(context.Background())
+	if mode, active := modelPricing(t, "unorouter", "gpt-4o:free"); mode != "unknown" || !active {
+		t.Fatalf("same-source reclassification = %s active=%v, want unknown", mode, active)
 	}
 }
 
-func TestOrchestratorActivationPreservesAccountsSyncedDuringDiscovery(t *testing.T) {
-	database := setupOrchestratorDB(t)
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := database.Exec(`
-		INSERT INTO providerConnections (id, provider, isActive, createdAt, updatedAt)
-		VALUES ('account-a', 'orcarouter', 1, ?, ?)
-	`, now, now); err != nil {
-		t.Fatalf("insert initial account: %v", err)
-	}
+func TestOrchestrator_DifferentSourceCannotDeactivateModelsDevSnapshot(t *testing.T) {
+	db := openDiscoveryDB(t)
 
-	adapter := &blockingDiscoveryAdapter{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
+	modelsDev := &scriptedAdapter{
+		id: "models.dev",
+		rounds: [][]Candidate{{
+			{ProviderID: "opencode", ModelID: "mimo-v2.6-flash-free", PricingMode: "free", UpstreamModel: "mimo-v2.6-flash-free"},
+		}},
 	}
-	orchestrator := NewOrchestrator(database, []Adapter{adapter})
-	done := make(chan struct{})
-	go func() {
-		orchestrator.RunSync(context.Background())
-		close(done)
-	}()
+	NewOrchestrator(db, []Adapter{modelsDev}).RunSync(context.Background())
 
-	select {
-	case <-adapter.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("discovery did not reach blocking adapter")
+	builtin := &scriptedAdapter{
+		id:    "builtin-free",
+		scope: []string{"opencode"},
+		rounds: [][]Candidate{{
+			{ProviderID: "opencode", ModelID: "muse-spark-1.3-contributor-free", PricingMode: "free", UpstreamModel: "muse-spark-1.3-contributor-free"},
+		}},
 	}
+	NewOrchestrator(db, []Adapter{builtin}).RunSync(context.Background())
 
-	// Discovery already copied account-a. Add account-b and synchronize it into
-	// the live registry before discovery publishes its older snapshot.
-	if _, err := database.Exec(`
-		INSERT INTO providerConnections (id, provider, isActive, createdAt, updatedAt)
-		VALUES ('account-b', 'orcarouter', 1, ?, ?)
-	`, now, now); err != nil {
-		t.Fatalf("insert concurrent account: %v", err)
+	if mode, active := modelPricing(t, "opencode", "mimo-v2.6-flash-free"); mode != "free" || !active {
+		t.Fatalf("startup seed deactivated models.dev snapshot: mode=%s active=%v", mode, active)
 	}
-	if _, err := database.Exec(`UPDATE controlplane_meta SET val = 900001 WHERE key = 'accounts_generation'`); err != nil {
-		t.Fatalf("advance account generation: %v", err)
+	if mode, active := modelPricing(t, "opencode", "muse-spark-1.3-contributor-free"); mode != "free" || !active {
+		t.Fatalf("builtin seed missing after sync: mode=%s active=%v", mode, active)
 	}
-	if err := cpsync.SyncAccountsFromDB(database); err != nil {
-		t.Fatalf("sync concurrent account: %v", err)
-	}
-	if registry.GetActiveState().Accounts["account-b"] == nil {
-		t.Fatal("precondition failed: account-b was not synchronized before discovery resumed")
-	}
+}
 
-	close(adapter.release)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("discovery did not finish after release")
+func TestOrchestrator_FailedAdapterKeepsPreviousFreeModels(t *testing.T) {
+	db := openDiscoveryDB(t)
+	okAdapter := &scriptedAdapter{
+		id:    "cline-free",
+		scope: []string{"cline"},
+		rounds: [][]Candidate{{
+			{ProviderID: "cline", ModelID: "keep", PricingMode: "free", UpstreamModel: "keep"},
+		}},
 	}
+	NewOrchestrator(db, []Adapter{okAdapter}).RunSync(context.Background())
 
-	// Same DB generation must now hit the sync fast path. If snapshot activation
-	// had overwritten account-b, this call would not repair it.
-	if err := cpsync.SyncAccountsFromDB(database); err != nil {
-		t.Fatalf("post-discovery fast sync: %v", err)
-	}
-	state := registry.GetActiveState()
-	if state.Accounts["account-a"] == nil || state.Accounts["account-b"] == nil {
-		t.Fatalf("discovery activation lost synchronized accounts: %#v", state.Accounts)
+	failed := &scriptedAdapter{id: "cline-free", scope: []string{"cline"}, err: os.ErrClosed}
+	NewOrchestrator(db, []Adapter{failed}).RunSync(context.Background())
+	if mode, active := modelPricing(t, "cline", "keep"); mode != "free" || !active {
+		t.Fatalf("failed discovery wiped the free model: %s active=%v", mode, active)
 	}
 }

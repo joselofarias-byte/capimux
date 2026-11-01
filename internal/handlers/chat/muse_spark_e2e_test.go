@@ -1,10 +1,11 @@
+//go:build live_e2e
+
 package chat
 
 import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -12,15 +13,7 @@ import (
 	"9router/proxy/internal/proxy/executor"
 )
 
-func requireLiveOpenCode(t *testing.T) {
-	t.Helper()
-	if os.Getenv("RUN_LIVE_OPENCODE") != "1" {
-		t.Skip("live OpenCode provider test; set RUN_LIVE_OPENCODE=1 to run")
-	}
-}
-
 func TestIntegration_OpenCode_MuseSpark_Messages(t *testing.T) {
-	requireLiveOpenCode(t)
 	executor.RegisterAll()
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -61,8 +54,8 @@ func TestIntegration_OpenCode_MuseSpark_Messages(t *testing.T) {
 	t.Logf("Response Code: %d", rec.Code)
 	t.Logf("Response Body: %s", rec.Body.String())
 
-	if rec.Code == http.StatusTooManyRequests {
-		t.Skipf("opencode free tier rate limited (429), skipping real upstream test: %s", rec.Body.String())
+	if rec.Code == http.StatusTooManyRequests || rec.Code == http.StatusForbidden {
+		t.Skipf("opencode free tier rate limited (429/403), skipping real upstream test: %s", rec.Body.String())
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
@@ -74,7 +67,6 @@ func TestIntegration_OpenCode_MuseSpark_Messages(t *testing.T) {
 }
 
 func TestIntegration_OpenCode_MuseSpark_Messages_NonStreaming(t *testing.T) {
-	requireLiveOpenCode(t)
 	executor.RegisterAll()
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -102,8 +94,8 @@ func TestIntegration_OpenCode_MuseSpark_Messages_NonStreaming(t *testing.T) {
 	t.Logf("Non-streaming Response Code: %d", rec.Code)
 	t.Logf("Non-streaming Response Body: %s", rec.Body.String())
 
-	if rec.Code == http.StatusTooManyRequests {
-		t.Skipf("opencode rate limited 429, skipping: %s", rec.Body.String())
+	if rec.Code == http.StatusTooManyRequests || rec.Code == http.StatusForbidden {
+		t.Skipf("opencode rate limited 429/403, skipping: %s", rec.Body.String())
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
@@ -119,7 +111,6 @@ func TestIntegration_OpenCode_MuseSpark_Messages_NonStreaming(t *testing.T) {
 }
 
 func TestIntegration_OpenCode_MuseSpark_ChatCompletions(t *testing.T) {
-	requireLiveOpenCode(t)
 	executor.RegisterAll()
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -163,8 +154,8 @@ func TestIntegration_OpenCode_MuseSpark_ChatCompletions(t *testing.T) {
 	t.Logf("Response Code: %d", rec.Code)
 	t.Logf("Response Body: %s", rec.Body.String())
 
-	if rec.Code == http.StatusTooManyRequests {
-		t.Skipf("opencode rate limited 429, skipping: %s", rec.Body.String())
+	if rec.Code == http.StatusTooManyRequests || rec.Code == http.StatusForbidden {
+		t.Skipf("opencode rate limited 429/403, skipping: %s", rec.Body.String())
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
@@ -172,7 +163,6 @@ func TestIntegration_OpenCode_MuseSpark_ChatCompletions(t *testing.T) {
 }
 
 func TestIntegration_OpenCode_MuseSpark_MultiTurnWithTools(t *testing.T) {
-	requireLiveOpenCode(t)
 	executor.RegisterAll()
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
@@ -235,10 +225,46 @@ func TestIntegration_OpenCode_MuseSpark_MultiTurnWithTools(t *testing.T) {
 	t.Logf("Response Code: %d", rec.Code)
 	t.Logf("Response Body: %s", rec.Body.String())
 
+	if rec.Code == http.StatusTooManyRequests || rec.Code == http.StatusForbidden {
+		t.Skipf("opencode rate limited 429/403, skipping: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIntegration_OpenCode_MuseSpark13_ChatCompletions(t *testing.T) {
+	executor.RegisterAll()
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+
+	repo := db.NewRepo(database)
+	handler := NewChatHandler(repo)
+
+	chatBody := `{
+		"model": "oc/muse-spark-1.3-contributor-free",
+		"messages": [
+			{"role": "user", "content": "Say hello in one word"}
+		],
+		"stream": false
+	}`
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(chatBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.HandleChatCompletions(rec, req)
+
+	t.Logf("1.3 Response Code: %d", rec.Code)
+	t.Logf("1.3 Response Body: %s", rec.Body.String())
+
 	if rec.Code == http.StatusTooManyRequests {
 		t.Skipf("opencode rate limited 429, skipping: %s", rec.Body.String())
 	}
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected HTTP 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected HTTP 200 for muse-spark-1.3, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "FreeTierError") {
+		t.Fatalf("unexpected FreeTierError: %s", rec.Body.String())
 	}
 }

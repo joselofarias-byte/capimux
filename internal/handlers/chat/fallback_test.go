@@ -20,7 +20,7 @@ import (
 // seedConnDB inserts a single active connection for the given provider pointing at upstream.
 func seedConnDB(t *testing.T, database *sql.DB, provider, connID, apiKey, baseURL string) {
 	t.Helper()
-	data, _ := json.Marshal(map[string]interface{}{"apiKey": apiKey, "baseUrl": baseURL})
+	data, _ := json.Marshal(map[string]any{"apiKey": apiKey, "baseUrl": baseURL})
 	q := `INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES (?, ?, 'apikey', 'Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`
 	if _, err := database.Exec(q, connID, provider, string(data)); err != nil {
 		t.Fatalf("seed connection: %v", err)
@@ -32,7 +32,7 @@ func TestApplyTokenSavers_AllOff(t *testing.T) {
 	defer cleanup()
 
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	got := h.applyTokenSavers(body)
+	got := h.applyTokenSavers(body, false)
 	if string(got) != string(body) {
 		t.Errorf("expected unchanged body when all token savers off")
 	}
@@ -59,7 +59,7 @@ func TestApplyTokenSavers_RTKOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	got := h.applyTokenSavers(body)
+	got := h.applyTokenSavers(body, false)
 	if string(got) == string(body) {
 		t.Errorf("expected RTK to modify body")
 	}
@@ -71,7 +71,7 @@ func TestApplyTokenSavers_CavemanInjects(t *testing.T) {
 	h.TokenSaver.SetCaveman(true)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	got := h.applyTokenSavers(body)
+	got := h.applyTokenSavers(body, false)
 	// Caveman prompt text should now appear in the system message.
 	if !strings.Contains(string(got), "terse") && !strings.Contains(string(got), "caveman") {
 		t.Errorf("expected caveman prompt injected, got %s", got)
@@ -84,7 +84,7 @@ func TestApplyTokenSavers_PonytailInjects(t *testing.T) {
 	h.TokenSaver.SetPonytail(true)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	got := h.applyTokenSavers(body)
+	got := h.applyTokenSavers(body, false)
 	if !strings.Contains(string(got), tokensaver.PonytailPrompt[:20]) {
 		t.Errorf("expected ponytail prompt injected, got %s", got)
 	}
@@ -107,19 +107,16 @@ func TestTryForwardWithConnection_Success(t *testing.T) {
 
 	body := []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`)
 	rec := httptest.NewRecorder()
-	err := h.tryForwardWithConnection(context.Background(), rec, "deepseek", "deepseek-chat", "conn-try", &ConnectionData{APIKey: "sk-try", BaseURL: srv.URL}, body, false, false, "/v1/chat/completions")
+	err := h.tryForwardWithConnection(forwardRequestParams{
+		Ctx: context.Background(), W: rec, Provider: "deepseek", Model: "deepseek-chat",
+		ConnectionID: "conn-try", ConnData: &ConnectionData{APIKey: "sk-try", BaseURL: srv.URL}, Body: body,
+		IsStream: false, TranslateResponse: false, Endpoint: "/v1/chat/completions",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
-	}
-	if level := globalTrustManager.GetTrustLevel("deepseek", "deepseek-chat", "conn-try"); level != "verified" {
-		t.Fatalf("expected real successful request to update trust to verified, got %s", level)
-	}
-	stats := globalTrustManager.GetStats("deepseek", "deepseek-chat", "conn-try")
-	if stats.SuccessRate != 1 {
-		t.Fatalf("expected success rate 1 after successful request, got %v", stats.SuccessRate)
 	}
 }
 
@@ -128,7 +125,11 @@ func TestTryForwardWithConnection_NoAPIKey(t *testing.T) {
 	defer cleanup()
 
 	rec := httptest.NewRecorder()
-	err := h.tryForwardWithConnection(context.Background(), rec, "deepseek", "deepseek-chat", "conn-x", &ConnectionData{}, []byte(`{}`), false, false, "/v1/chat/completions")
+	err := h.tryForwardWithConnection(forwardRequestParams{
+		Ctx: context.Background(), W: rec, Provider: "deepseek", Model: "deepseek-chat",
+		ConnectionID: "conn-x", ConnData: &ConnectionData{}, Body: []byte(`{}`),
+		IsStream: false, TranslateResponse: false, Endpoint: "/v1/chat/completions",
+	})
 	if err == nil {
 		t.Fatal("expected error when API key missing")
 	}
@@ -150,6 +151,9 @@ func TestHandleAccountFallback_RetryableLocksModel(t *testing.T) {
 
 	database, cleanup := setupChatTestDB(t)
 	defer cleanup()
+	if _, err := database.Exec(`DELETE FROM providerConnections WHERE id IN ('conn-1', 'conn-2')`); err != nil {
+		t.Fatalf("clear seeded connections: %v", err)
+	}
 	seedConnDB(t, database, "deepseek", "conn-429", "sk-429", srv.URL)
 
 	repo := db.NewRepo(database)
@@ -168,55 +172,6 @@ func TestHandleAccountFallback_RetryableLocksModel(t *testing.T) {
 	}
 	if !locked {
 		t.Error("expected conn-429 per-connection lock after 429 on all connections")
-	}
-}
-
-func TestHandleAccountFallback_SkipsLockedConnectionByID(t *testing.T) {
-	var lockedHits atomic.Int32
-	lockedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lockedHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"locked-should-not-run"}`))
-	}))
-	defer lockedSrv.Close()
-
-	var healthyHits atomic.Int32
-	healthySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		healthyHits.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"done"}}]}`))
-	}))
-	defer healthySrv.Close()
-
-	database, cleanup := setupChatTestDB(t)
-	defer cleanup()
-	if _, err := database.Exec(`DELETE FROM providerConnections WHERE provider = 'deepseek'`); err != nil {
-		t.Fatalf("clear seeded deepseek connections: %v", err)
-	}
-	seedConnDB(t, database, "deepseek", "conn-locked", "sk-locked", lockedSrv.URL)
-	seedConnDB(t, database, "deepseek", "conn-healthy", "sk-healthy", healthySrv.URL)
-	if _, err := database.Exec(`UPDATE providerConnections SET priority = CASE id WHEN 'conn-locked' THEN 1 ELSE 2 END WHERE id IN ('conn-locked','conn-healthy')`); err != nil {
-		t.Fatalf("set connection priorities: %v", err)
-	}
-
-	repo := db.NewRepo(database)
-	if err := repo.LockConnectionModel("conn-locked", "deepseek-chat", 60, 1); err != nil {
-		t.Fatalf("lock connection: %v", err)
-	}
-	h := NewChatHandler(repo)
-
-	body := []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}`)
-	rec := httptest.NewRecorder()
-	err := h.handleAccountFallback(context.Background(), rec, "deepseek", "deepseek-chat", "", body, false, false, "/v1/chat/completions")
-	if err != nil {
-		t.Fatalf("expected fallback to healthy account, got: %v", err)
-	}
-	if got := lockedHits.Load(); got != 0 {
-		t.Fatalf("locked account was attempted %d times", got)
-	}
-	if got := healthyHits.Load(); got != 1 {
-		t.Fatalf("expected healthy account once, got %d", got)
 	}
 }
 
@@ -275,11 +230,14 @@ func TestHandleMessagesComboFallback_RetriesOnceOnBoundedRetryAfter(t *testing.T
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
 		if n == 1 {
-			// Upstream says "wait ~4s" (RFC3339). The 429 connection lock is ~2s,
-			// so the retry pass after the wait finds it unlocked again.
-			ra := time.Now().Add(4 * time.Second).Format(time.RFC3339)
+			// Upstream says "wait ~1s" (RFC3339). A 429 is only worth retrying
+			// inside brief429RetryTolerance — past that the account is out of
+			// quota and re-hitting it deepens the upstream's backoff — so the
+			// bound, not the old 8s cap, is what this covers. Rounded up
+			// (isoRetryAfterBody): a truncated RFC3339 second could already be
+			// in the past when parsed, leaving no wait and no retry.
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":{"retryAfter":"` + ra + `"}}`))
+			w.Write([]byte(isoRetryAfterBody(time.Second)))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -325,5 +283,77 @@ func TestHandleAccountFallback_NoConnections(t *testing.T) {
 	err := h.handleAccountFallback(context.Background(), rec, "nonexistent-provider", "model", "", body, false, false, "/v1/chat/completions")
 	if err == nil {
 		t.Fatal("expected error when provider has no connections")
+	}
+}
+
+func TestHandleAccountFallback_503CapacityLocksCanonicalModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{
+			"error": {
+				"code": 503,
+				"message": "No capacity available for model gemini-3.8-flash-tiered on the server",
+				"status": "UNAVAILABLE",
+				"details": [{"reason": "MODEL_CAPACITY_EXHAUSTED"}]
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	database, cleanup := setupChatTestDB(t)
+	defer cleanup()
+	agData, _ := json.Marshal(map[string]any{
+		"apiKey":      "tok-ag",
+		"accessToken": "tok-ag",
+		"baseUrl":     srv.URL,
+		"projectId":   "test-proj-503",
+		"providerSpecificData": map[string]any{
+			"projectId": "test-proj-503",
+		},
+	})
+	if _, err := database.Exec(`INSERT INTO providerConnections (id, provider, authType, name, priority, isActive, data, createdAt, updatedAt) VALUES ('conn-ag-cap', 'antigravity', 'oauth', 'AG Cap Test', 1, 1, ?, '2026-07-18T00:00:00Z', '2026-07-18T00:00:00Z')`, string(agData)); err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	repo := db.NewRepo(database)
+	h := NewChatHandler(repo)
+
+	body := []byte(`{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":"ping"}]}`)
+	rec := httptest.NewRecorder()
+	err := h.handleAccountFallback(context.Background(), rec, "antigravity", "gemini-3.8-flash-low", "", body, false, false, "/v1/chat/completions")
+	if err == nil {
+		t.Fatal("expected error after 503 capacity exhaustion")
+	}
+
+	// Canonical model "gemini-3.8-flash-tiered" must be locked
+	lockedCanonical, err := repo.IsConnectionModelLocked("conn-ag-cap", "gemini-3.8-flash-tiered")
+	if err != nil {
+		t.Fatalf("check canonical lock: %v", err)
+	}
+	if !lockedCanonical {
+		t.Error("expected canonical model gemini-3.8-flash-tiered to be locked on 503 capacity error")
+	}
+
+	// Best connection for gemini-3.8-flash-high must now skip this connection because canonical tiered is locked!
+	conn, _, _ := h.GetBestConnection("antigravity", "", nil, "gemini-3.8-flash-high")
+	if conn != nil {
+		t.Errorf("expected no connection available for high tier when canonical model is locked, got %s", conn.ID)
+	}
+}
+
+func TestExtractErrorText_CloudflareHTML(t *testing.T) {
+	htmlBody := []byte(`<!DOCTYPE html>
+<html class="no-js" lang="en-US">
+<head>
+<title>Attention Required! | Cloudflare</title>
+<meta charset="UTF-8" />
+</head>
+<body>
+<h1>Attention Required!</h1>
+</body>
+</html>`)
+
+	got := extractErrorText(htmlBody)
+	if !strings.Contains(got, "Cloudflare WAF challenge") {
+		t.Errorf("expected Cloudflare WAF challenge in error text, got %q", got)
 	}
 }

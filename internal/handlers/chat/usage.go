@@ -1,20 +1,183 @@
 package chat
 
 import (
-	"9router/proxy/internal/log"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"9router/proxy/internal/constants"
+	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/pricing"
 	"9router/proxy/internal/translator"
 	"9router/proxy/internal/usagetracker"
 )
 
 var dailyUsageMu sync.Mutex
+
+const maxPersistedErrorLen = 512
+
+// Request bodies and response text are sensitive. Only explicit opt-in stores
+// them in diagnostic records; token accounting is unaffected.
+func captureRequestDetailContent() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("CAPIMUX_CAPTURE_REQUEST_CONTENT")), "true")
+}
+
+// LogFailure persists a bounded, credential-free diagnostic for a failed or
+// aborted request. It intentionally does not touch usageHistory/daily totals.
+func (h *ChatHandler) LogFailure(
+	info *UsageLogInfo,
+	usage *translator.OpenAIUsage,
+	err error,
+	latencyMs int64,
+	requestBody []byte,
+	metrics *streamMetrics,
+) {
+	if info == nil || h.Repo == nil || err == nil {
+		return
+	}
+	if usage == nil {
+		usage = &translator.OpenAIUsage{}
+	}
+	now := time.Now().UTC()
+	reqID := fmt.Sprintf("%d-%s", now.UnixMilli(), info.Model)
+	tokens := map[string]int{
+		"prompt_tokens":               usage.PromptTokens,
+		"completion_tokens":           usage.CompletionTokens,
+		"cached_tokens":               usage.GetCachedTokens(),
+		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
+	}
+	statusCode := http.StatusBadGateway
+	var upstreamErr *upstreamError
+	if errors.As(err, &upstreamErr) && upstreamErr.StatusCode > 0 {
+		statusCode = upstreamErr.StatusCode
+	}
+	if isClientCanceled(nil, err) {
+		statusCode = StatusClientClosedRequest
+	}
+	message := extractErrorText([]byte(err.Error()))
+	if message == "" {
+		var upstreamErr *upstreamError
+		if errors.As(err, &upstreamErr) {
+			message = extractErrorText(upstreamErr.Body)
+		}
+	}
+	if message == "" {
+		message = "request failed"
+	}
+	message = sanitizeDetailError(message)
+	captureContent := captureRequestDetailContent()
+	if !captureContent {
+		message = "request failed"
+	}
+	// The error type and code are short identifiers chosen by the upstream
+	// API, not request content, so they stay even when capture is off.
+	errType, errCode := upstreamErrorIdentifiers(upstreamErr)
+	if statusCode == StatusClientClosedRequest {
+		errType, errCode = "client_closed_request", ""
+	}
+	var responseContent string
+	if captureContent && metrics != nil {
+		responseContent = metrics.ResponseBuf.String()
+		if len(responseContent) > constants.MaxResponseContentLen {
+			responseContent = responseContent[:constants.MaxResponseContentLen] + "...[truncated]"
+		}
+	}
+	var reqMsgs []map[string]string
+	if captureContent {
+		reqMsgs = extractRequestMessages(requestBody)
+	}
+	reqData, marshalErr := json.Marshal(map[string]any{
+		"id": reqID, "provider": info.Provider, "model": info.Model,
+		"connectionId": info.ConnectionID, "status": "error",
+		"timestamp": now.Format("2006-01-02T15:04:05.000Z"),
+		"latency": map[string]int64{
+			"ttft":  metricsTTFT(metrics),
+			"total": latencyMs,
+		},
+		"tokens":  tokens,
+		"request": map[string]any{"messages": reqMsgs},
+		"response": map[string]any{
+			"error": message, "status": statusCode, "content": responseContent,
+			"errorType": errType, "errorCode": errCode,
+		},
+	})
+	if marshalErr != nil {
+		return
+	}
+	if insertErr := h.Repo.InsertRequestDetail(
+		reqID,
+		info.Provider,
+		info.Model,
+		info.ConnectionID,
+		"error",
+		string(reqData),
+	); insertErr != nil {
+		log.Error("usage", "insert failed request detail failed", "error", insertErr)
+	}
+}
+
+// safeErrorIdentifier accepts only short machine identifiers, so free text
+// (which may echo the prompt) can never ride in through the type or code.
+var safeErrorIdentifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+
+// upstreamErrorIdentifiers extracts error.type and error.code from an
+// upstream JSON error body. Anything that is not a short identifier is dropped.
+func upstreamErrorIdentifiers(ue *upstreamError) (errType, errCode string) {
+	if ue == nil || len(ue.Body) == 0 {
+		return "", ""
+	}
+	var body struct {
+		Error struct {
+			Type any `json:"type"`
+			Code any `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(ue.Body, &body) != nil {
+		return "", ""
+	}
+	return safeIdentifierValue(body.Error.Type), safeIdentifierValue(body.Error.Code)
+}
+
+func safeIdentifierValue(v any) string {
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case float64:
+		if x != float64(int64(x)) {
+			return ""
+		}
+		s = strconv.FormatInt(int64(x), 10)
+	default:
+		return ""
+	}
+	if !safeErrorIdentifier.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
+func metricsTTFT(metrics *streamMetrics) int64 {
+	if metrics == nil {
+		return 0
+	}
+	return metrics.TTFT
+}
+
+func sanitizeDetailError(message string) string {
+	if len(message) > maxPersistedErrorLen {
+		return message[:maxPersistedErrorLen] + "...[truncated]"
+	}
+	return message
+}
 
 // LogUsage is the exported method to persist a usage record and update connection metadata.
 func (h *ChatHandler) LogUsage(info *UsageLogInfo, usage *translator.OpenAIUsage, latencyMs int64, requestBody []byte, metrics *streamMetrics) {
@@ -52,11 +215,21 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 	}
 
 	totalTokens := usage.PromptTokens + usage.CompletionTokens
-	cost := pricing.EstimateCost(info.Model, usage.PromptTokens, usage.CompletionTokens)
-	metaJSON := fmt.Sprintf(`{"provider":"%s","model":"%s","connectionId":"%s"}`, info.Provider, info.Model, info.ConnectionID)
-
 	cachedTokens := usage.GetCachedTokens()
 	cacheCreationTokens := usage.CacheCreationInputTokens
+
+	// prompt_tokens is cache-inclusive, so the cached and cache-creation counts
+	// are handed over too: the formula takes them out of the input rate and
+	// charges them at their own, cheaper rate. The provider matters because
+	// gateways can price the same model differently.
+	cost := pricing.EstimateCost(info.Provider, info.Model, pricing.TokenCounts{
+		PromptTokens:        usage.PromptTokens,
+		CompletionTokens:    usage.CompletionTokens,
+		CachedTokens:        cachedTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		ReasoningTokens:     usage.ReasoningTokens(),
+	})
+	metaJSON := fmt.Sprintf(`{"provider":"%s","model":"%s","connectionId":"%s"}`, info.Provider, info.Model, info.ConnectionID)
 
 	log.Info("usage", "logged", "provider", info.Provider, "model", info.Model, "prompt", usage.PromptTokens, "completion", usage.CompletionTokens, "cached", cachedTokens, "cache_creation", cacheCreationTokens, "ttft_ms", ttftMs, "latency_ms", latencyMs, "cost", cost)
 
@@ -67,7 +240,12 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 
 	now := time.Now().UTC()
 	reqID := fmt.Sprintf("%d-%s", now.UnixMilli(), info.Model)
-	reqMsgs := extractRequestMessages(requestBody)
+	var reqMsgs []map[string]string
+	persistedResponse := ""
+	if captureRequestDetailContent() {
+		reqMsgs = extractRequestMessages(requestBody)
+		persistedResponse = respContent
+	}
 
 	reqData, err := json.Marshal(map[string]any{
 		"id": reqID, "provider": info.Provider, "model": info.Model,
@@ -80,7 +258,7 @@ func (h *ChatHandler) logUsage(info *UsageLogInfo, usage *translator.OpenAIUsage
 			"reasoning_tokens": usage.ReasoningTokens(),
 		},
 		"request":  map[string]any{"messages": reqMsgs},
-		"response": map[string]any{"content": respContent},
+		"response": map[string]any{"content": persistedResponse},
 	})
 	if err != nil {
 		log.Error("usage", "marshal request detail failed", "error", err)
@@ -319,10 +497,9 @@ func getJSONMap(m map[string]any, key string) map[string]any {
 	return make(map[string]any)
 }
 
-// maskAPIKey returns a masked version of an API key for storage.
+// maskAPIKey returns a masked version of an API key for storage. The canonical
+// implementation lives in handlerutil so the usage-stats reader can derive the
+// same mask from a stored row to recover the key's name.
 func maskAPIKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	return key[:4] + "***" + key[len(key)-4:]
+	return handlerutil.MaskAPIKey(key)
 }

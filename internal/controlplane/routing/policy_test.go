@@ -67,38 +67,99 @@ func TestEngine_SelectCandidates(t *testing.T) {
 	}
 }
 
-
-func TestEngine_SelectCandidates_UsesObservedPerformance(t *testing.T) {
+func TestEngine_SelectCandidates_DynamicFreePool(t *testing.T) {
 	registry.InitRegistry(nil)
 	state := registry.GetActiveState()
 
-	for _, providerID := range []string{"fast", "slow"} {
-		state.Providers[providerID] = &registry.Provider{ID: providerID, IsActive: true}
-		state.ProviderModels[providerID] = map[string]*registry.ProviderModel{
-			"model": {ProviderID: providerID, ModelID: "model", PricingMode: "paid", IsActive: true},
-		}
-		state.Accounts[providerID+"-account"] = &registry.Account{
-			ID: providerID + "-account", ProviderID: providerID, IsActive: true,
-		}
+	state.Providers["p1"] = &registry.Provider{ID: "p1", IsActive: true}
+	state.Providers["p2"] = &registry.Provider{ID: "p2", IsActive: true}
+	state.Providers["p_inactive"] = &registry.Provider{ID: "p_inactive", IsActive: false}
+
+	state.ProviderModels["p1"] = map[string]*registry.ProviderModel{
+		"gpt-4":   {ProviderID: "p1", ModelID: "gpt-4", PricingMode: "paid", IsActive: true},
+		"llama":   {ProviderID: "p1", ModelID: "llama", UpstreamModel: "llama-3.1-8b", PricingMode: "free", IsActive: true},
+		"dropped": {ProviderID: "p1", ModelID: "dropped", PricingMode: "free", IsActive: false},
+	}
+	state.ProviderModels["p2"] = map[string]*registry.ProviderModel{
+		"qwen":    {ProviderID: "p2", ModelID: "qwen", PricingMode: "free_tier", IsActive: true},
+		"unknown": {ProviderID: "p2", ModelID: "deepseek-chat-free", PricingMode: "unknown", IsActive: true},
+		"upper":   {ProviderID: "p2", ModelID: "upper", PricingMode: "FREE", IsActive: true},
+		"spaced":  {ProviderID: "p2", ModelID: "spaced", PricingMode: "free ", IsActive: true},
+		"trial":   {ProviderID: "p2", ModelID: "trial", PricingMode: "trial", IsActive: true},
+		"blank":   {ProviderID: "p2", ModelID: "blank", PricingMode: "", IsActive: true},
+	}
+	state.ProviderModels["p_inactive"] = map[string]*registry.ProviderModel{
+		"free-but-down": {ProviderID: "p_inactive", ModelID: "free-but-down", PricingMode: "free", IsActive: true},
+	}
+	state.ProviderModels["p_missing"] = map[string]*registry.ProviderModel{
+		"orphan": {ProviderID: "p_missing", ModelID: "orphan", PricingMode: "free", IsActive: true},
 	}
 
-	tm := trust.NewManager()
-	// Keep trust and success rate equal; TTFT is the only scoring difference.
-	tm.RecordRequestOutcome("fast", "model", "fast-account", true, "", 150, 100)
-	tm.RecordRequestOutcome("slow", "model", "slow-account", true, "", 150, 2500)
+	state.Accounts["a1"] = &registry.Account{ID: "a1", ProviderID: "p1", IsActive: true}
+	state.Accounts["a2"] = &registry.Account{ID: "a2", ProviderID: "p2", IsActive: true}
+	state.Accounts["a_inactive"] = &registry.Account{ID: "a_inactive", ProviderID: "p_inactive", IsActive: true}
+	state.Accounts["a_missing"] = &registry.Account{ID: "a_missing", ProviderID: "p_missing", IsActive: true}
+	state.Accounts["a1_off"] = &registry.Account{ID: "a1_off", ProviderID: "p1", IsActive: false}
 
-	engine := &Engine{TrustManager: tm}
-	got := engine.SelectCandidates("model", PolicyBalanced)
+	engine := &Engine{TrustManager: trust.NewManager()}
+
+	res := engine.SelectCandidates("", PolicyFreeOnly)
+	got := map[string]bool{}
+	for _, node := range res {
+		got[node.ProviderID+"/"+node.ModelID] = true
+		if node.AccountID == "a1_off" {
+			t.Errorf("inactive account %s was selected", node.AccountID)
+		}
+	}
+	for _, want := range []string{"p1/llama", "p2/qwen"} {
+		if !got[want] {
+			t.Errorf("expected free pool to include %s, got %#v", want, got)
+		}
+	}
+	for _, banned := range []string{"p1/gpt-4", "p1/dropped", "p2/deepseek-chat-free", "p2/upper", "p2/spaced", "p2/trial", "p2/blank", "p_inactive/free-but-down", "p_missing/orphan"} {
+		if got[banned] {
+			t.Errorf("free pool included %s", banned)
+		}
+	}
 	if len(got) != 2 {
-		t.Fatalf("expected 2 candidates, got %d", len(got))
+		t.Fatalf("expected exactly 2 free models, got %#v", got)
 	}
-	if got[0].ProviderID != "fast" {
-		t.Fatalf("expected lower observed TTFT to rank first, got %#v", got)
+
+	// Exact match must not expand to the rest of the pool.
+	exact := engine.SelectCandidates("gpt-4", PolicyFreeOnly)
+	if len(exact) != 0 {
+		t.Fatalf("paid gpt-4 must stay out of free-only exact match, got %+v", exact)
 	}
-	if got[0].Score.Dimensions["success_rate"] != got[1].Score.Dimensions["success_rate"] {
-		t.Fatalf("precondition failed: success-rate scores differ, got %#v", got)
+	exactFree := engine.SelectCandidates("llama", PolicyBalanced)
+	if len(exactFree) != 1 || exactFree[0].ProviderID != "p1" || exactFree[0].UpstreamModel != "llama-3.1-8b" {
+		t.Fatalf("exact llama match changed, got %+v", exactFree)
 	}
-	if got[0].Score.Dimensions["performance"] <= got[1].Score.Dimensions["performance"] {
-		t.Fatalf("observed TTFT did not affect performance score: %#v", got)
+}
+
+
+func TestEngine_NoAuthProviderGetsVirtualCandidateWithoutStoredAccount(t *testing.T) {
+	registry.InitRegistry(nil)
+	state := registry.GetActiveState()
+	state.Providers["llamacpp"] = &registry.Provider{ID: "llamacpp", IsActive: true}
+	state.ProviderModels["llamacpp"] = map[string]*registry.ProviderModel{
+		"qwen-local": {
+			ProviderID:    "llamacpp",
+			ModelID:       "qwen-local",
+			UpstreamModel: "qwen-local",
+			PricingMode:   "free",
+			IsActive:      true,
+		},
+	}
+
+	engine := &Engine{TrustManager: trust.NewManager()}
+	got := engine.SelectCandidates("", PolicyFreeOnly)
+	if len(got) != 1 {
+		t.Fatalf("expected one no-auth candidate, got %+v", got)
+	}
+	if got[0].ProviderID != "llamacpp" || got[0].AccountID != VirtualNoAuthAccountID("llamacpp") {
+		t.Fatalf("unexpected no-auth candidate: %+v", got[0])
+	}
+	if !IsVirtualNoAuthAccount("llamacpp", got[0].AccountID) {
+		t.Fatalf("candidate did not carry a valid virtual no-auth identity: %+v", got[0])
 	}
 }
