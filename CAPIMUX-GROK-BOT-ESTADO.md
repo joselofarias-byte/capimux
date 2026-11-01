@@ -663,9 +663,32 @@ Este documento no contiene claves, secretos ni tokens.
 ## Auditoría fase 1 en main (#130, rama `fix/audit-phase1-main`)
 
 - La rama sale de `origin/main`. Porta los fixes de seguridad de #130 que faltaban: cap de 1 MiB en OAuth, endpoint `/v1/messages`, `strictProxy` fail-closed y refresh del caché de pools con round-robin. Todos tienen tests. #130 sigue abierto y sin cambio de base.
-- Partes pendientes con impacto de seguridad, portadas con opt-in apagado: arranque estricto del control plane, snapshot que preserva cuentas y pricing estricto de OrcaRouter. La validación de política de `explain-route` va sin flag.
-- Partes no portadas: routing adaptativo A4 (pendiente de #144), el workflow vivo `provider-live.yml` (sin llamadas vivas) y las rutas admin A7 (las cubre #142 con `RequireAdminAuth`).
+- Partes pendientes con impacto de seguridad, portadas con opt-in apagado: arranque estricto del control plane, validación de política en `explain-route`, snapshot que preserva cuentas y pricing estricto de OrcaRouter.
+- Partes no portadas: routing adaptativo A4 (pendiente de #144), el workflow vivo `provider-live.yml` (sin llamadas vivas) y las rutas admin A7 (las cubre #142, ya mergeado, con `RequireAdminAuth`).
 - Detalle en `docs/audit-phase1-pending.es.md`. Falta que el propietario decida qué hacer con #130: retarget a main, apuntarlo a esta rama o abrir un PR nuevo.
+### Cierre de verificación de #142 — Free Best: failover solo en rutas gratuitas elegibles (31/10, 15:20 UTC-3)
+
+- **Rama:** `cursor/free-best-engine-f768`. Se mergeó `main` `3e1e05b2` y quedó el merge commit `9839a3b7`.
+- **Conflicto:** solo en `internal/handlers/chat/fallback_test.go`, en el mismo test inestable que ya habían corregido la rama y #165. Me quedé con la versión de `main`, que usa `isoRetryAfterBody` y ya estaba revisada y mergeada en #165. Ningún archivo de código de producción tuvo conflicto.
+- **Defaults:** Free Best no se activa por defecto y el proveedor por defecto no cambia. Los endpoints de diagnóstico nuevos (`/api/admin/free-best` y `/api/admin/explain-route`) quedan detrás de `RequireAdminAuth`. Se mantiene el comportamiento de #157: ante un 4xx permanente, se prueba cada cuenta una sola vez.
+- **Batería** (worktree limpio en `9839a3b7`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | 0 |
+| `go test -race -count=1 ./...` | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10` de 70 tests de free-best y fallback (`./internal/handlers/chat`, `./internal/proxy/...`, `./internal/providers`) | 0 |
+| `go test -tags=integration -count=10` de `TestFreeBestProductionRouterFailover` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **GitHub en `9839a3b7`:** `MERGEABLE` / `CLEAN`, con CI en verde.
+- **Estado:** queda listo para revisión si el CI de este commit de documentación también pasa. No está mergeado.
+
 ### Perfil DeepSeek opt-in DSH → InferX (31/10, 22:45–23:00 UTC-3)
 
 Rama `feat/deepseek-profile-20261031`, desde `origin/main` (`3e1e05b2`), con
@@ -710,6 +733,35 @@ configuración, reglas y reversión: `docs/PERFIL_DEEPSEEK.es.md`.
   - DSH: 6 respuestas 200, media ~2,97 s.
   - InferX: 6 respuestas 200, ~14,03 s.
   - Auditoría DSH: 3 pruebas OK, incluidas las herramientas autorizadas y `tool_choice` none.
+
+### Cierre de verificación de #143 — estadísticas por solicitud (31/10, 18:25 UTC-3)
+
+- **Rama:** `feat/request-statistics-20261022`. Se mergeó `main` `3e1e05b2`.
+- **Conflicto:** solo en `internal/handlers/chat/usage.go` (`logUsage`). Quedaron combinadas las dos partes: el `uuid` de la rama para el ID del request, el filtro de privacidad de #139 (prompts y respuestas solo con `CAPIMUX_CAPTURE_REQUEST_CONTENT=true`) y los campos nuevos `cost`, `costEstimated`, `tokensEstimated` y `endpoint`.
+- **Test nuevo:** `TestRequestStatisticsDoNotPersistContentOrCredentials`. Con la captura apagada, el registro conserva costo, endpoint y cuenta, pero no guarda ni el texto del prompt ni la API key.
+- **Coherencia:**
+  - El costo sale de la tabla local `internal/pricing`, sin llamadas de red. Si la tarifa es desconocida queda `null`, no 0.
+  - La cuenta es el `connectionId` o el nombre que ya tiene la lista de conexiones del dashboard, sin credenciales.
+  - El endpoint es una ruta fija del servidor, sin query string.
+  - El porcentaje de caché y la velocidad descartan valores inválidos (los cubren los tests web).
+  - Los detalles siguen siendo solo para admin.
+- **Batería** (worktree limpio en `c15a77c3`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `bun test` (135 pasan, 0 fallan) | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10 -v` de las estadísticas y los detalles de requests (10 tests) | 0 (100 de 100 pasan) |
+| `go test -tags=integration -count=10 -v` de `TestDashboardRequestStatistics` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **Estado:** no está mergeado. Pasa a revisión si el CI queda en verde.
 
 ## 7. Pruebas y verificación
 
