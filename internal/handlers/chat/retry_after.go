@@ -212,7 +212,7 @@ func parseRetryAfterHeader(v string) (time.Duration, bool) {
 		if secs <= 0 {
 			return 0, false
 		}
-		return time.Duration(secs) * time.Second, true
+		return secondsWait(secs), true
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		if d := time.Until(t); d > 0 {
@@ -248,9 +248,23 @@ func parseDurationString(v string) (time.Duration, bool) {
 		return d, d > 0
 	}
 	if secs, err := strconv.Atoi(v); err == nil {
-		return time.Duration(secs) * time.Second, secs > 0
+		return secondsWait(secs), secs > 0
 	}
 	return 0, false
+}
+
+// secondsWait converts an upstream's delta-seconds without letting a huge
+// value overflow time.Duration into a negative wait (which every caller then
+// read as "no wait" and re-picked the exhausted account). Anything past
+// maxResetCooldown is held there, as every cooldown already is.
+func secondsWait(secs int) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs > int(maxResetCooldown/time.Second) {
+		return maxResetCooldown
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func ceilSeconds(d time.Duration) int {

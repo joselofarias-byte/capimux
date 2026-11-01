@@ -76,13 +76,27 @@ func fastQuotaGate(t *testing.T) {
 	t.Cleanup(func() { quotaFetchGate = prev })
 }
 
-// assertSpaced fails when two upstream reads started closer together than the
-// gate floor — the exact shape that got ten accounts on one IP rate-limited.
-func assertSpaced(t *testing.T, hits []time.Time, minGap time.Duration) {
+// assertSpaced fails when upstream reads arrived as a burst instead of one
+// gate floor apart — the exact shape that got ten accounts on one IP
+// rate-limited.
+//
+// Every read is measured from origin, an instant taken before the burst was
+// fired (so before the gate handed out its first slot). Slot k opens exactly k
+// floors after the first one, the gate's timer never fires early, and the
+// request crosses a loopback socket and an HTTP handler only after its slot
+// opened, so the k-th read to arrive can never do so before origin + k floors.
+// Delivery noise only makes reads later; it cannot make this check fail.
+// Measuring from the first read instead (the previous version) let one slow
+// delivery of read 0 shrink every later interval (seen: 36ms against a 40ms
+// floor in a -race run of the full suite), which is why that check needed a
+// half-floor tolerance and still flaked. The millisecond covers coarse timer
+// clocks only.
+func assertSpaced(t *testing.T, origin time.Time, hits []time.Time, minGap time.Duration) {
 	t.Helper()
-	for i := 1; i < len(hits); i++ {
-		if gap := hits[i].Sub(hits[i-1]); gap < minGap*9/10 {
-			t.Errorf("upstream reads %d and %d were %s apart, want >= %s", i-1, i, gap, minGap)
+	for k, at := range hits {
+		want := time.Duration(k)*minGap - time.Millisecond
+		if got := at.Sub(origin); got < want {
+			t.Errorf("upstream read #%d arrived %s after the burst started, want >= %s (%d gate floors of %s)", k, got, want+time.Millisecond, k, minGap)
 		}
 	}
 }
@@ -124,6 +138,7 @@ func TestHandleGetConnectionUsage_SpacesBurstAcrossConnections(t *testing.T) {
 	router := setupTestRouter(repo)
 
 	// Exactly what QuotaTrackerView does on auto-refresh: one parallel fan-out.
+	origin := time.Now()
 	codes := fireConcurrentUsageReads(t, router, ids)
 	for _, id := range ids {
 		if codes[id] != http.StatusOK {
@@ -135,7 +150,7 @@ func TestHandleGetConnectionUsage_SpacesBurstAcrossConnections(t *testing.T) {
 	if len(hits) < len(ids) {
 		t.Fatalf("provider saw %d reads for %d connections", len(hits), len(ids))
 	}
-	assertSpaced(t, hits, usageFetchGap)
+	assertSpaced(t, origin, hits, usageFetchGap)
 }
 
 // The Antigravity branch does not go through fetchProviderUsage, so the gate
@@ -178,6 +193,7 @@ func TestHandleGetConnectionUsage_SpacesAntigravityBurst(t *testing.T) {
 
 	router := setupTestRouter(repo)
 
+	origin := time.Now()
 	codes := fireConcurrentUsageReads(t, router, ids)
 	for _, id := range ids {
 		if codes[id] != http.StatusOK {
@@ -193,7 +209,64 @@ func TestHandleGetConnectionUsage_SpacesAntigravityBurst(t *testing.T) {
 		if len(hits) != len(ids) {
 			t.Fatalf("%s: provider saw %d calls for %d connections", label, len(hits), len(ids))
 		}
-		assertSpaced(t, hits, usageFetchGap)
+		assertSpaced(t, origin, hits, usageFetchGap)
+	}
+}
+
+// The timing-free counterpart of the two tests above: with a one-hour gate
+// floor, a parallel fan-out over four connections may reach the provider
+// exactly once (the first slot is immediate); every other read is still
+// queued when its client gives up. Any upstream read that bypassed the gate
+// would show up as a second hit, however loaded the machine is.
+func TestHandleGetConnectionUsage_BurstIsHeldByTheGate(t *testing.T) {
+	prev := quotaFetchGate
+	quotaFetchGate = fetchgate.New(time.Hour, 0)
+	t.Cleanup(func() { quotaFetchGate = prev })
+
+	rec := &hitRecorder{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/usage", func(w http.ResponseWriter, r *http.Request) {
+		rec.mark("usage")
+		_, _ = w.Write([]byte(`{"limits":{"session":{"usage":0.1},"weekly":{"usage":0.2}}}`))
+	})
+	mux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
+		rec.mark("me")
+		_, _ = w.Write([]byte(`{"Plan":"pro"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	prevUsage, prevMe := ollamaUsageURL, ollamaMeURL
+	ollamaUsageURL, ollamaMeURL = srv.URL+"/api/usage", srv.URL+"/api/me"
+	t.Cleanup(func() { ollamaUsageURL, ollamaMeURL = prevUsage, prevMe })
+
+	repo, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
+	var ids []string
+	for i := range 4 {
+		id := fmt.Sprintf("ollama-held-%d", i)
+		if err := repo.CreateProviderConnection(id, "ollama", "api_key", id, fmt.Sprintf("key-%d", i)); err != nil {
+			t.Fatalf("seed connection %s: %v", id, err)
+		}
+		ids = append(ids, id)
+	}
+	router := setupTestRouter(repo)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/api/usage/"+id, nil).WithContext(ctx)
+			router.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	wg.Wait()
+
+	if n := rec.count("usage"); n != 1 {
+		t.Errorf("provider saw %d usage reads from a 4-connection burst behind a 1h gate, want exactly 1", n)
 	}
 }
 
