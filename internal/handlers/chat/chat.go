@@ -49,6 +49,12 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Opt-in DeepSeek profile (off unless CAPIMUX_DEEPSEEK_PROFILE is set):
+	// only its own virtual model id is intercepted.
+	if h.serveDeepSeekProfile(w, r, body, reqBody.Model) {
+		return
+	}
+
 	modelInfo, err := h.resolveModel(reqBody.Model)
 	if err != nil {
 		WriteResolveError(w, err)
@@ -449,6 +455,9 @@ func (h *ChatHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 		if !seen[id] {
 			result.Models = append(result.Models, ModelInfoObject{ID: id, Object: "model", OwnedBy: "fabric"})
 		}
+	}
+	if p := h.deepseek; p != nil && p.cfgErr == nil && !seen[strings.ToLower(p.modelID)] {
+		result.Models = append(result.Models, ModelInfoObject{ID: p.modelID, Object: "model", OwnedBy: "deepseek-profile"})
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"object":      "list",

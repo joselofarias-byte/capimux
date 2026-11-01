@@ -666,6 +666,50 @@ Este documento no contiene claves, secretos ni tokens.
 - Partes pendientes con impacto de seguridad, portadas con opt-in apagado: arranque estricto del control plane, snapshot que preserva cuentas y pricing estricto de OrcaRouter. La validación de política de `explain-route` va sin flag.
 - Partes no portadas: routing adaptativo A4 (pendiente de #144), el workflow vivo `provider-live.yml` (sin llamadas vivas) y las rutas admin A7 (las cubre #142 con `RequireAdminAuth`).
 - Detalle en `docs/audit-phase1-pending.es.md`. Falta que el propietario decida qué hacer con #130: retarget a main, apuntarlo a esta rama o abrir un PR nuevo.
+### Perfil DeepSeek opt-in DSH → InferX (31/10, 22:45–23:00 UTC-3)
+
+Rama `feat/deepseek-profile-20261031`, desde `origin/main` (`3e1e05b2`), con
+merge de `origin/main` (`9aa31343`, que incluye #173) a mitad de trabajo. Detalle de
+configuración, reglas y reversión: `docs/PERFIL_DEEPSEEK.es.md`.
+
+- **Auditoría previa.** El chat entra por `HandleChatCompletions`, que resuelve
+  el modelo hacia un combo (`handleComboFallback`, con `triedThisEntry`/#157: cada
+  cuenta una vez ante 4xx permanente) o hacia un modelo único
+  (`handleAccountFallback`). `committedResponseWriter` evita reintentar cuando
+  ya se enviaron bytes. #171 (`internal/retrypolicy`) solo cambia los reintentos
+  de media no idempotente; el chat sigue rotando. #139: el contenido solo se
+  persiste con `CAPIMUX_CAPTURE_REQUEST_CONTENT=true`. `logUsage` estima los
+  tokens en cero (caracteres/4) y les pone un costo de tabla, sin marcarlos.
+  #143 (`tokensEstimated`) no está en main.
+- **Diseño.** El paquete nuevo `internal/deepseekprofile` es independiente del
+  motor de combos, así que #157 y #171 no cambian. En `HandleChatCompletions`
+  hay un único gancho, que intercepta solo el id virtual. Apagado por defecto.
+  Con el perfil encendido pero mal configurado (sin `CAPIMUX_DEEPSEEK_DSH_URL`),
+  responde 503 en vez de mandar todo a InferX.
+- **Verificación (SHA `44752d67`).** Todos los comandos devolvieron RC 0:
+  - `bun run build`;
+  - `go build ./...`, `go vet ./...` y `go vet -tags=integration ./...`;
+  - `go test -count=1 ./...`;
+  - `-race` en `deepseekprofile`, `handlers/chat` e `integration`;
+  - integración con `-race`;
+  - Termux (`CGO_ENABLED=0 GOOS=android GOARCH=arm64`, binario `03 00 b7 00`);
+  - pruebas nuevas con `-count=10`: unidad, unidad con `-race`, chat e integración con `-race`.
+
+  En la base anterior (`c539a144`, sin #173) `TestProviders` fallaba por la
+  fecha fija: era una causa ajena, que #173 ya corrigió.
+- **Mutantes.** Cada mutante hizo fallar al menos una prueba:
+  - agregar 400 a la lista de respaldo;
+  - desactivar el control de tools sin stream y con stream;
+  - no redactar el secreto;
+  - tratar un 2xx vacío como corte.
+- **Pendiente.**
+  - Verificar cómo ejecuta las herramientas DSH por dentro. Lo anotó el propietario y no se investigó en el servidor real.
+  - Elegir la URL privada de DSH (túnel o IP privada) para cualquier Capimux que no corra en Oracle Lab.
+  - Validar con tráfico real una vez mergeado. Las pruebas son simuladas y no reemplazan esa evidencia.
+- **Evidencia del propietario** (reportada por él, no repetida):
+  - DSH: 6 respuestas 200, media ~2,97 s.
+  - InferX: 6 respuestas 200, ~14,03 s.
+  - Auditoría DSH: 3 pruebas OK, incluidas las herramientas autorizadas y `tool_choice` none.
 
 ## 7. Pruebas y verificación
 
