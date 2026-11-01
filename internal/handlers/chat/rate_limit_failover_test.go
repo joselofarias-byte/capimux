@@ -26,8 +26,21 @@ const rateLimitedBody = `{"error":{"message":"rate limited"}}`
 
 // isoRetryAfterBody carries the wait as an absolute timestamp, the shape
 // extractRetryAfter has always understood.
+//
+// RFC3339 here has whole seconds, so formatting now+d by truncation left a
+// wait anywhere in (d-1s, d], and for d=1s a parse a few microseconds later
+// could see a timestamp already in the past: no usable wait, no second pass,
+// and "429 with a brief retry-after" failed about once in a few hundred runs
+// (seen under -race). Rounding up to the next whole second keeps the wait in
+// [d, d+1s) at format time, which is what an upstream announcing "at least d"
+// means. Every assertion on it is a floor (or a ±1s match), so nothing that
+// used to fail for a real reason can pass now.
 func isoRetryAfterBody(d time.Duration) string {
-	return `{"error":{"message":"rate limited","retryAfter":"` + time.Now().Add(d).UTC().Format(time.RFC3339) + `"}}`
+	at := time.Now().Add(d)
+	if rounded := at.Truncate(time.Second); rounded.Before(at) {
+		at = rounded.Add(time.Second)
+	}
+	return `{"error":{"message":"rate limited","retryAfter":"` + at.UTC().Format(time.RFC3339) + `"}}`
 }
 
 // TestRetryAfterWait_Extraction pins every carrier of a retry instruction. The
@@ -203,8 +216,10 @@ func TestComboRateLimitFailover(t *testing.T) {
 			failFirstHits: 1, wantHits: 2, wantStatus: http.StatusOK,
 		},
 		{
-			// An RFC3339 Retry-After is truncated to whole seconds, so the wait
-			// lands anywhere in (2s, 3s]; the floor is what is pinned.
+			// isoRetryAfterBody rounds the RFC3339 instant up, so the wait is
+			// in [3s, 4s); the handler must hold the request for the
+			// announced wait, and 2s is the floor pinned since before the
+			// rounding (it also absorbs the time spent before parsing).
 			name:     "a transient 503 keeps the wider retry cap",
 			accounts: 2, status: http.StatusServiceUnavailable,
 			body:          func() string { return isoRetryAfterBody(3 * time.Second) },
