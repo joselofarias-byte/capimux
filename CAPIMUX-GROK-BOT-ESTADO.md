@@ -660,6 +660,13 @@ Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` va
 
 Este documento no contiene claves, secretos ni tokens.
 
+## Auditoría fase 1 en main (#130, rama `fix/audit-phase1-main`)
+
+- La rama sale de `origin/main`. Porta los fixes de seguridad de #130 que faltaban: cap de 1 MiB en OAuth, endpoint `/v1/messages`, `strictProxy` fail-closed y refresh del caché de pools con round-robin. Todos tienen tests. #130 sigue abierto y sin cambio de base.
+- Partes pendientes con impacto de seguridad, portadas con opt-in apagado: arranque estricto del control plane, snapshot que preserva cuentas y pricing estricto de OrcaRouter. La validación de política de `explain-route` va sin flag.
+- Partes no portadas: routing adaptativo A4 (pendiente de #144), el workflow vivo `provider-live.yml` (sin llamadas vivas) y las rutas admin A7 (las cubre #142 con `RequireAdminAuth`).
+- Detalle en `docs/audit-phase1-pending.es.md`. Falta que el propietario decida qué hacer con #130: retarget a main, apuntarlo a esta rama o abrir un PR nuevo.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.

@@ -34,6 +34,14 @@ func (h *ChatHandler) HandleAdminExplainRoute(w http.ResponseWriter, r *http.Req
 	policy := routing.PolicyBalanced
 	if policyParam != "" {
 		policy = routing.Policy(policyParam)
+		// Reject invented policies instead of explaining a route no request
+		// can take (audit phase 1, #103).
+		switch policy {
+		case routing.PolicyBalanced, routing.PolicyFreeOnly, routing.PolicyFreeFirst, routing.PolicyTrusted:
+		default:
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, "Unsupported 'policy' parameter")
+			return
+		}
 	}
 
 	// For explanation, we just instantiate the Engine directly (in production, passed down)

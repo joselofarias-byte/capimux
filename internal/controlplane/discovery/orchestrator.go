@@ -193,7 +193,14 @@ func (o *Orchestrator) RunSync(ctx context.Context) {
 			return
 		}
 
-		err = registry.ActivateSnapshot(o.db, snap.Version)
+		if PreserveAccountsEnabled() {
+			// Accounts are DB-authoritative: keep the map already in memory so
+			// a disconnected account copied into this snapshot at read time is
+			// never routable, not even between activation and the refresh below.
+			err = registry.ActivateSnapshotPreservingAccounts(o.db, snap.Version)
+		} else {
+			err = registry.ActivateSnapshot(o.db, snap.Version)
+		}
 		if err != nil {
 			log.Warn("orchestrator", "failed to activate snapshot", "err", err)
 			return

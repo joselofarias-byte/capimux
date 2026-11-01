@@ -329,8 +329,10 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 	// claudeNative indicates the CLIENT body is in Claude Messages format.
 	// Requires an Anthropic upstream too: chat.go converts /v1/messages
 	// requests for non-Anthropic providers (DeepSeek, OpenAI-compatible) to
-	// OpenAI format before the fallback, and passing endpoint "/v1/v1/messages"
+	// OpenAI format before the fallback, and passing endpoint "/v1/messages"
 	// alone would wrongly inject a top-level "system" the upstream ignores.
+	// "/v1/v1/messages" is the doubled endpoint older callers passed (fixed in
+	// #130); it is still accepted so nothing that sends it regresses.
 	claudeNative := isAnthropic && (endpoint == "/v1/v1/messages" || endpoint == "/v1/messages")
 	pipedBody := h.applyTokenSavers(body, claudeNative)
 	var claudeToolMap map[string]string
