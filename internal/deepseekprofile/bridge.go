@@ -78,6 +78,24 @@ type Bridge struct {
 	cfg    *Config
 	client *http.Client
 	logf   func(level, msg string, kv ...any)
+
+	// gate, when set, is consulted before falling back to the paid InferX
+	// provider. It is read on every request (panel changes apply live). nil
+	// keeps the env-only behaviour (used by tests of the bridge itself).
+	gate func() bool
+}
+
+// SetFallbackGate installs the InferX fallback gate. Production wiring always
+// installs one: InferX is used only if the panel toggle is on and a DeepSeek
+// Web session is connected.
+func (b *Bridge) SetFallbackGate(g func() bool) { b.gate = g }
+
+// fallbackAllowedTo reports whether the bridge may move on to p.
+func (b *Bridge) fallbackAllowedTo(p Provider) bool {
+	if p.Name != ProviderInferX || b.gate == nil {
+		return true
+	}
+	return b.gate()
 }
 
 // NewBridge builds a bridge with its own HTTP client: no global response
@@ -184,6 +202,10 @@ func (b *Bridge) Serve(ctx context.Context, w http.ResponseWriter, body []byte) 
 			return out
 		}
 		hasNext := i+1 < len(b.cfg.Providers)
+		if Fallback(res.kind, res.status) && hasNext && !b.fallbackAllowedTo(b.cfg.Providers[i+1]) {
+			b.logf("warn", "perfil DeepSeek: respaldo InferX no habilitado (requiere toggle explícito y sesión DeepSeek Web conectada)", "provider", p.Name, "kind", string(res.kind), "status", res.status)
+			hasNext = false
+		}
 		if Fallback(res.kind, res.status) && hasNext {
 			b.logf("warn", "perfil DeepSeek: respaldo al siguiente proveedor", "provider", p.Name, "next", b.cfg.Providers[i+1].Name, "kind", string(res.kind), "status", res.status, "detail", res.detail)
 			continue

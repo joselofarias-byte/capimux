@@ -11,6 +11,7 @@ import (
 	json "encoding/json/v2"
 
 	"9router/proxy/internal/deepseekprofile"
+	"9router/proxy/internal/deepseekweb"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/translator"
@@ -45,17 +46,21 @@ func loadDeepSeekProfile(env deepseekprofile.Env) *deepseekProfile {
 		names = append(names, p.Name)
 	}
 	log.Info("deepseek-profile", "perfil DeepSeek habilitado", "model", cfg.ModelID, "providers", strings.Join(names, " -> "))
-	return &deepseekProfile{
-		modelID: cfg.ModelID,
-		bridge: deepseekprofile.NewBridge(cfg, func(level, msg string, kv ...any) {
-			if level == "warn" {
-				log.Warn("deepseek-profile", msg, kv...)
-				return
-			}
-			log.Info("deepseek-profile", msg, kv...)
-		}),
-	}
+	bridge := deepseekprofile.NewBridge(cfg, func(level, msg string, kv ...any) {
+		if level == "warn" {
+			log.Warn("deepseek-profile", msg, kv...)
+			return
+		}
+		log.Info("deepseek-profile", msg, kv...)
+	})
+	// The paid InferX fallback needs the explicit panel toggle and a
+	// connected DeepSeek Web session; an InferX key alone is not enough.
+	bridge.SetFallbackGate(func() bool { return deepseekFallbackGate() })
+	return &deepseekProfile{modelID: cfg.ModelID, bridge: bridge}
 }
+
+// deepseekFallbackGate is replaceable in tests.
+var deepseekFallbackGate = deepseekweb.DefaultFallbackAllowed
 
 // SetDeepSeekProfileEnv replaces the profile configuration (tests, embedders).
 func (h *ChatHandler) SetDeepSeekProfileEnv(env deepseekprofile.Env) {

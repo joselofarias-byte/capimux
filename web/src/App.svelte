@@ -14,6 +14,7 @@
   import AnalyticsView from './components/analytics/AnalyticsView.svelte'
   import ApiKeysView from './components/ApiKeysView.svelte'
   import KeyQuotasView from './components/keyquota/KeyQuotasView.svelte'
+  import DeepSeekWebView from './components/deepseekweb/DeepSeekWebView.svelte'
   import CliToolsView from './components/CliToolsView.svelte'
   import CombosView from './components/combos/CombosView.svelte'
   import ConnectionsView from './components/connections/ConnectionsView.svelte'
@@ -369,6 +370,8 @@
               <AnalyticsView {connections} {providerNodes} />
             {:else if activeTab === 'key-quotas'}
               <KeyQuotasView />
+            {:else if activeTab === 'deepseek-web'}
+              <DeepSeekWebView />
             {:else if activeTab === 'quota'}
               <QuotaTrackerView {connections} />
             {:else if activeTab === 'token-saver'}
