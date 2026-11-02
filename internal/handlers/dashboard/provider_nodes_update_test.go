@@ -34,6 +34,8 @@ func putNode(t *testing.T, router http.Handler, id, body string) *httptest.Respo
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPut, "/api/provider-nodes/"+id, bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
+	// The dashboard owner edits destinations; a client API key may not.
+	asDashboardAdmin(t, req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec

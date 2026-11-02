@@ -314,6 +314,15 @@ func outputCtx(ctx context.Context, l Level, tag, msg string, kv ...any) {
 }
 
 func output(l Level, tag, msg string, kv ...any) {
+	msg = RedactString(msg)
+	if len(kv) > 0 {
+		red := make([]any, len(kv))
+		copy(red, kv)
+		for i := 1; i < len(red); i += 2 {
+			red[i] = redactValue(fmt.Sprint(red[i-1]), red[i])
+		}
+		kv = red
+	}
 	levelMu.RLock()
 	jsonMode := isJSONFormat
 	levelMu.RUnlock()

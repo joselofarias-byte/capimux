@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/samber/lo"
+
+	"9router/proxy/internal/auth"
 )
 
 // apiKeyRow is one row of GET /api/keys.
@@ -48,8 +51,31 @@ func requireApiKey(t *testing.T, rows []apiKeyRow, id string) apiKeyRow {
 // on, so a toggle that stopped revoking would keep a retired key usable.
 func TestApiKeyLifecycle(t *testing.T) {
 	env := newEnv(t)
+	// Creating, toggling and deleting keys is admin-only: a client API key is
+	// refused (see "a client key cannot manage keys" below), so the lifecycle
+	// runs with a dashboard session like the real panel.
+	session, err := auth.Sign(auth.Secret(), time.Now())
+	if err != nil {
+		t.Fatalf("sign session token: %v", err)
+	}
+	admin := WithHeader("Cookie", auth.CookieName+"="+session)
 
-	created := env.Post(t, "/api/keys", map[string]any{"name": "CI Key"})
+	t.Run("a client key cannot manage keys", func(t *testing.T) {
+		if res := env.Post(t, "/api/keys", map[string]any{"name": "attacker"}); res.Status != http.StatusForbidden {
+			t.Fatalf("POST /api/keys with a client key = %d, want 403 (body: %s)", res.Status, truncate(res.Body))
+		}
+		if res := env.Delete(t, "/api/keys/integration-key"); res.Status != http.StatusForbidden {
+			t.Fatalf("DELETE /api/keys with a client key = %d, want 403 (body: %s)", res.Status, truncate(res.Body))
+		}
+		if res := env.Put(t, "/api/keys/integration-key/toggle", map[string]any{"isActive": false}); res.Status != http.StatusForbidden {
+			t.Fatalf("PUT /api/keys/toggle with a client key = %d, want 403 (body: %s)", res.Status, truncate(res.Body))
+		}
+		if res := env.Get(t, "/v1/models"); res.Status != http.StatusOK {
+			t.Fatalf("seed key stopped working after refused management calls: %d", res.Status)
+		}
+	})
+
+	created := env.Post(t, "/api/keys", map[string]any{"name": "CI Key"}, admin)
 	if created.Status != http.StatusOK {
 		t.Fatalf("POST /api/keys = %d, want 200 (body: %s)", created.Status, truncate(created.Body))
 	}
@@ -74,7 +100,7 @@ func TestApiKeyLifecycle(t *testing.T) {
 	})
 
 	t.Run("deactivating revokes it", func(t *testing.T) {
-		if res := env.Put(t, "/api/keys/"+id+"/toggle", map[string]any{"isActive": false}); res.Status != http.StatusOK {
+		if res := env.Put(t, "/api/keys/"+id+"/toggle", map[string]any{"isActive": false}, admin); res.Status != http.StatusOK {
 			t.Fatalf("PUT /api/keys/%s/toggle = %d, want 200 (body: %s)", id, res.Status, truncate(res.Body))
 		}
 		if got := requireApiKey(t, listApiKeys(t, env), id).IsActive; got != 0 {
@@ -90,7 +116,7 @@ func TestApiKeyLifecycle(t *testing.T) {
 		if err := env.Repo.SetApiKeyStatus(id, true); err != nil {
 			t.Fatalf("reactivate key: %v", err)
 		}
-		if res := env.Delete(t, "/api/keys/"+id); res.Status != http.StatusOK {
+		if res := env.Delete(t, "/api/keys/"+id, admin); res.Status != http.StatusOK {
 			t.Fatalf("DELETE /api/keys/%s = %d, want 200 (body: %s)", id, res.Status, truncate(res.Body))
 		}
 		res := env.Get(t, "/v1/models", WithAPIKey(createResp.Key))
