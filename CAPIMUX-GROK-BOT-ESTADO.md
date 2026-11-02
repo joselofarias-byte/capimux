@@ -660,6 +660,103 @@ Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` va
 
 Este documento no contiene claves, secretos ni tokens.
 
+### Cierre de verificación de #142 — Free Best: failover solo en rutas gratuitas elegibles (31/10, 15:20 UTC-3)
+
+- **Rama:** `cursor/free-best-engine-f768`. Se mergeó `main` `3e1e05b2` y quedó el merge commit `9839a3b7`.
+- **Conflicto:** solo en `internal/handlers/chat/fallback_test.go`, en el mismo test inestable que ya habían corregido la rama y #165. Me quedé con la versión de `main`, que usa `isoRetryAfterBody` y ya estaba revisada y mergeada en #165. Ningún archivo de código de producción tuvo conflicto.
+- **Defaults:** Free Best no se activa por defecto y el proveedor por defecto no cambia. Los endpoints de diagnóstico nuevos (`/api/admin/free-best` y `/api/admin/explain-route`) quedan detrás de `RequireAdminAuth`. Se mantiene el comportamiento de #157: ante un 4xx permanente, se prueba cada cuenta una sola vez.
+- **Batería** (worktree limpio en `9839a3b7`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` | 0 |
+| `go test -race -count=1 ./...` | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10` de 70 tests de free-best y fallback (`./internal/handlers/chat`, `./internal/proxy/...`, `./internal/providers`) | 0 |
+| `go test -tags=integration -count=10` de `TestFreeBestProductionRouterFailover` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **GitHub en `9839a3b7`:** `MERGEABLE` / `CLEAN`, con CI en verde.
+- **Estado:** queda listo para revisión si el CI de este commit de documentación también pasa. No está mergeado.
+
+### Perfil DeepSeek opt-in DSH → InferX (31/10, 22:45–23:00 UTC-3)
+
+Rama `feat/deepseek-profile-20261031`, desde `origin/main` (`3e1e05b2`), con
+merge de `origin/main` (`9aa31343`, que incluye #173) a mitad de trabajo. Detalle de
+configuración, reglas y reversión: `docs/PERFIL_DEEPSEEK.es.md`.
+
+- **Auditoría previa.** El chat entra por `HandleChatCompletions`, que resuelve
+  el modelo hacia un combo (`handleComboFallback`, con `triedThisEntry`/#157: cada
+  cuenta una vez ante 4xx permanente) o hacia un modelo único
+  (`handleAccountFallback`). `committedResponseWriter` evita reintentar cuando
+  ya se enviaron bytes. #171 (`internal/retrypolicy`) solo cambia los reintentos
+  de media no idempotente; el chat sigue rotando. #139: el contenido solo se
+  persiste con `CAPIMUX_CAPTURE_REQUEST_CONTENT=true`. `logUsage` estima los
+  tokens en cero (caracteres/4) y les pone un costo de tabla, sin marcarlos.
+  #143 (`tokensEstimated`) no está en main.
+- **Diseño.** El paquete nuevo `internal/deepseekprofile` es independiente del
+  motor de combos, así que #157 y #171 no cambian. En `HandleChatCompletions`
+  hay un único gancho, que intercepta solo el id virtual. Apagado por defecto.
+  Con el perfil encendido pero mal configurado (sin `CAPIMUX_DEEPSEEK_DSH_URL`),
+  responde 503 en vez de mandar todo a InferX.
+- **Verificación (SHA `44752d67`).** Todos los comandos devolvieron RC 0:
+  - `bun run build`;
+  - `go build ./...`, `go vet ./...` y `go vet -tags=integration ./...`;
+  - `go test -count=1 ./...`;
+  - `-race` en `deepseekprofile`, `handlers/chat` e `integration`;
+  - integración con `-race`;
+  - Termux (`CGO_ENABLED=0 GOOS=android GOARCH=arm64`, binario `03 00 b7 00`);
+  - pruebas nuevas con `-count=10`: unidad, unidad con `-race`, chat e integración con `-race`.
+
+  En la base anterior (`c539a144`, sin #173) `TestProviders` fallaba por la
+  fecha fija: era una causa ajena, que #173 ya corrigió.
+- **Mutantes.** Cada mutante hizo fallar al menos una prueba:
+  - agregar 400 a la lista de respaldo;
+  - desactivar el control de tools sin stream y con stream;
+  - no redactar el secreto;
+  - tratar un 2xx vacío como corte.
+- **Pendiente.**
+  - Verificar cómo ejecuta las herramientas DSH por dentro. Lo anotó el propietario y no se investigó en el servidor real.
+  - Elegir la URL privada de DSH (túnel o IP privada) para cualquier Capimux que no corra en Oracle Lab.
+  - Validar con tráfico real una vez mergeado. Las pruebas son simuladas y no reemplazan esa evidencia.
+- **Evidencia del propietario** (reportada por él, no repetida):
+  - DSH: 6 respuestas 200, media ~2,97 s.
+  - InferX: 6 respuestas 200, ~14,03 s.
+  - Auditoría DSH: 3 pruebas OK, incluidas las herramientas autorizadas y `tool_choice` none.
+
+### Cierre de verificación de #143 — estadísticas por solicitud (31/10, 18:25 UTC-3)
+
+- **Rama:** `feat/request-statistics-20261022`. Se mergeó `main` `3e1e05b2`.
+- **Conflicto:** solo en `internal/handlers/chat/usage.go` (`logUsage`). Quedaron combinadas las dos partes: el `uuid` de la rama para el ID del request, el filtro de privacidad de #139 (prompts y respuestas solo con `CAPIMUX_CAPTURE_REQUEST_CONTENT=true`) y los campos nuevos `cost`, `costEstimated`, `tokensEstimated` y `endpoint`.
+- **Test nuevo:** `TestRequestStatisticsDoNotPersistContentOrCredentials`. Con la captura apagada, el registro conserva costo, endpoint y cuenta, pero no guarda ni el texto del prompt ni la API key.
+- **Coherencia:**
+  - El costo sale de la tabla local `internal/pricing`, sin llamadas de red. Si la tarifa es desconocida queda `null`, no 0.
+  - La cuenta es el `connectionId` o el nombre que ya tiene la lista de conexiones del dashboard, sin credenciales.
+  - El endpoint es una ruta fija del servidor, sin query string.
+  - El porcentaje de caché y la velocidad descartan valores inválidos (los cubren los tests web).
+  - Los detalles siguen siendo solo para admin.
+- **Batería** (worktree limpio en `c15a77c3`):
+
+| Comando | RC |
+|---|---|
+| `bun run build` | 0 |
+| `bun test` (135 pasan, 0 fallan) | 0 |
+| `go build ./...` | 0 |
+| `go vet ./...` | 0 |
+| `go vet -tags=integration ./...` | 0 |
+| `go test -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 ./...` (50 paquetes ok) | 0 |
+| `go test -race -count=1 -tags=integration ./internal/integration/...` | 0 |
+| `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` | 0 |
+| `go test -count=10 -v` de las estadísticas y los detalles de requests (10 tests) | 0 (100 de 100 pasan) |
+| `go test -tags=integration -count=10 -v` de `TestDashboardRequestStatistics` y `TestRetryableUpstreamErrorRotatesAccount` | 0 (20 de 20 pasan) |
+
+- **Estado:** no está mergeado. Pasa a revisión si el CI queda en verde.
+
 ## 7. Pruebas y verificación
 
 - Prueba nueva con el router real (`SetupServerRouter`) y SQLite temporal: **falla en `main`** (las 6 variantes devuelven 200 y el ajuste queda escrito) y **pasa con la corrección**.
