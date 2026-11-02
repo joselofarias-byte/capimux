@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,7 +18,16 @@ import (
 	"9router/proxy/internal/updater"
 )
 
-const defaultLicenseControlPlaneURL = "https://9router-licensing-prototype.joselofarias.workers.dev"
+// licenseURLEnv names the only way to point this binary at a license control
+// plane. There is deliberately no built-in default: without an explicit URL the
+// binary never contacts any external licensing service, and Community keeps
+// working fully offline.
+const licenseURLEnv = "NINEROUTER_LICENSE_URL"
+
+// ErrLicenseURLNotConfigured is returned by commands that need the license
+// control plane (activate, renew, release) when NINEROUTER_LICENSE_URL is not
+// set. It is checked before any local license state is created or modified.
+var ErrLicenseURLNotConfigured = errors.New("license server not configured: set " + licenseURLEnv + " explicitly to activate, renew or release a license (Community works without it)")
 
 // These values are intentionally public build metadata. Release jobs may
 // override them with -ldflags "-X main.licenseBuildChannel=... -X
@@ -186,7 +196,6 @@ func licenseReleaseAction(cCtx *cli.Context) error {
 	return releaseLicense(cCtx.Context)
 }
 
-
 func activateLicense(ctx context.Context, code string) error {
 	client, err := newLicenseClient()
 	if err != nil {
@@ -297,6 +306,12 @@ func printLicenseStatus(status entitlements.Status) {
 }
 
 func newLicenseClient() (*entitlements.Client, error) {
+	// Resolve the control-plane URL first so a missing configuration never
+	// creates installation keys, lease files or any other local state.
+	controlPlaneURL, err := currentLicenseControlPlaneURL()
+	if err != nil {
+		return nil, err
+	}
 	build, err := currentLicenseBuildIdentity()
 	if err != nil {
 		return nil, err
@@ -305,7 +320,7 @@ func newLicenseClient() (*entitlements.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport, err := entitlements.NewHTTPTransport(currentLicenseControlPlaneURL(), nil)
+	transport, err := entitlements.NewHTTPTransport(controlPlaneURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -336,11 +351,11 @@ func licenseKeyRingForBuild(build entitlements.BuildIdentity) (entitlements.KeyR
 	}
 }
 
-func currentLicenseControlPlaneURL() string {
-	if value := strings.TrimSpace(os.Getenv("NINEROUTER_LICENSE_URL")); value != "" {
-		return value
+func currentLicenseControlPlaneURL() (string, error) {
+	if value := strings.TrimSpace(os.Getenv(licenseURLEnv)); value != "" {
+		return value, nil
 	}
-	return defaultLicenseControlPlaneURL
+	return "", ErrLicenseURLNotConfigured
 }
 
 func currentLicenseBuildIdentity() (entitlements.BuildIdentity, error) {

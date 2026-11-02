@@ -148,7 +148,6 @@ func TestHTTPTransportBoundsResponseBody(t *testing.T) {
 	}
 }
 
-
 func TestHTTPTransportRejectsRemotePlainHTTP(t *testing.T) {
 	if _, err := NewHTTPTransport("http://example.com", nil); !errors.Is(err, ErrInsecureControlPlaneURL) {
 		t.Fatalf("error = %v, want %v", err, ErrInsecureControlPlaneURL)
@@ -160,7 +159,6 @@ func TestHTTPTransportRejectsCredentialsInBaseURL(t *testing.T) {
 		t.Fatal("base URL credentials unexpectedly accepted")
 	}
 }
-
 
 func TestHTTPTransportReleasePath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

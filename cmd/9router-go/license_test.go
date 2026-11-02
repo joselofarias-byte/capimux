@@ -4,7 +4,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
 )
 
 func TestLicenseCommandShape(t *testing.T) {
@@ -114,11 +113,11 @@ func TestCurrentLicenseControlPlaneURLAllowsExplicitOverride(t *testing.T) {
 	if err := os.Setenv("NINEROUTER_LICENSE_URL", override); err != nil {
 		t.Fatal(err)
 	}
-	if got := currentLicenseControlPlaneURL(); got != override {
-		t.Fatalf("control plane = %q, want %q", got, override)
+	got, err := currentLicenseControlPlaneURL()
+	if err != nil || got != override {
+		t.Fatalf("control plane = %q, %v; want %q", got, err, override)
 	}
 }
-
 
 func TestLicenseKeyRingForBuildUsesStagingOnlyForBeta(t *testing.T) {
 	oldChannel := licenseBuildChannel

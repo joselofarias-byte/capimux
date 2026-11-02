@@ -104,6 +104,9 @@ func (s *RuntimeStore) loadInstallationPrivateKey() (ed25519.PrivateKey, error) 
 		if err != nil {
 			return err
 		}
+		if err := tightenPrivateFile(path); err != nil {
+			return fmt.Errorf("protect installation proof key: %w", err)
+		}
 		privateKey, err = parseInstallationPrivateKey(raw)
 		return err
 	})
@@ -123,6 +126,9 @@ func (s *RuntimeStore) loadOrCreateInstallationPrivateKey() (ed25519.PrivateKey,
 	err := withPathLock(path, func() error {
 		raw, err := readRecoverable(path)
 		if err == nil {
+			if err := tightenPrivateFile(path); err != nil {
+				return fmt.Errorf("protect installation proof key: %w", err)
+			}
 			privateKey, err = parseInstallationPrivateKey(raw)
 			return err
 		}

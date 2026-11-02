@@ -33,10 +33,10 @@ func signedLeaseFixture(t *testing.T, mutate func(*Lease)) ([]byte, KeyRing, Ver
 		},
 		IssuedAt:     now.Add(-time.Hour),
 		ExpiresAt:    now.Add(7 * 24 * time.Hour),
-		GraceUntil:  now.Add(10 * 24 * time.Hour),
+		GraceUntil:   now.Add(10 * 24 * time.Hour),
 		BuildChannel: "beta",
-		BuildID:       "beta-20261005.1",
-		Nonce:         "nonce-001",
+		BuildID:      "beta-20261005.1",
+		Nonce:        "nonce-001",
 	}
 	if mutate != nil {
 		mutate(lease)

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	CurrentLeaseVersion = 1
+	CurrentLeaseVersion   = 1
 	DefaultLeaseClockSkew = 5 * time.Minute
 )
 

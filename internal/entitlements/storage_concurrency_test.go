@@ -174,7 +174,6 @@ func TestRuntimeStoreRecoversAbandonedLock(t *testing.T) {
 	}
 }
 
-
 func TestRuntimeStoreDoesNotAbandonLiveOwnerAfterClockJump(t *testing.T) {
 	store := NewRuntimeStore(t.TempDir())
 	path := store.installationIDPath()

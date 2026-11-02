@@ -23,6 +23,7 @@ var (
 	ErrControlPlaneResponseTooLarge = errors.New("control plane response too large")
 	ErrControlPlaneInvalidResponse  = errors.New("invalid control plane response")
 	ErrInsecureControlPlaneURL      = errors.New("insecure control plane URL")
+	ErrControlPlaneRedirect         = errors.New("control plane redirects are not followed")
 )
 
 type HTTPTransport struct {
@@ -60,6 +61,17 @@ func NewHTTPTransport(baseURL string, client *http.Client) (*HTTPTransport, erro
 	}
 	if client == nil {
 		client = &http.Client{Timeout: defaultControlPlaneTimeout}
+	} else {
+		copied := *client
+		client = &copied
+		if client.Timeout <= 0 {
+			client.Timeout = defaultControlPlaneTimeout
+		}
+	}
+	// Never follow redirects: a 307/308 would replay the POST body (activation
+	// code, proofs) to whatever host the response names, including plain HTTP.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return ErrControlPlaneRedirect
 	}
 	return &HTTPTransport{
 		baseURL:          strings.TrimRight(baseURL, "/"),

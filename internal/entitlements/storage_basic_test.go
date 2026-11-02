@@ -83,7 +83,6 @@ func TestRuntimeStoreTrustedTimeOnlyMovesForward(t *testing.T) {
 	}
 }
 
-
 func TestRuntimeStoreCommunityStartupDoesNotRequireTrustedTime(t *testing.T) {
 	store := NewRuntimeStore(t.TempDir())
 	state, err := store.LoadRuntime(RuntimeOptions{})

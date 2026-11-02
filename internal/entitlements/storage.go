@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -17,20 +18,20 @@ import (
 )
 
 const (
-	runtimeDirName       = "license"
-	installationIDName   = "installation-id"
-	leaseCacheName       = "lease.json"
-	lastTrustedTimeName  = "last-trusted-time"
-	privateDirPerm       = 0700
-	privateFilePerm      = 0600
-	runtimeLockRetry     = 10 * time.Millisecond
-	runtimeLockTimeout   = 5 * time.Second
-	runtimeLockStale     = 30 * time.Second
+	runtimeDirName      = "license"
+	installationIDName  = "installation-id"
+	leaseCacheName      = "lease.json"
+	lastTrustedTimeName = "last-trusted-time"
+	privateDirPerm      = 0700
+	privateFilePerm     = 0600
+	runtimeLockRetry    = 10 * time.Millisecond
+	runtimeLockTimeout  = 5 * time.Second
+	runtimeLockStale    = 30 * time.Second
 )
 
 var (
 	ErrRuntimeStoreLockTimeout = errors.New("entitlement runtime store lock timeout")
-	ErrTrustedTimeRequired       = errors.New("trusted time is required for cached entitlement lease")
+	ErrTrustedTimeRequired     = errors.New("trusted time is required for cached entitlement lease")
 )
 
 // RuntimeStore keeps signed entitlement runtime state below the configured
@@ -335,7 +336,7 @@ func (s *RuntimeStore) LoadRuntime(options RuntimeOptions) (*RuntimeState, error
 // restored automatically if the process stops between replacement steps.
 func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, privateDirPerm); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return err
 	}
 
@@ -381,6 +382,42 @@ func atomicWriteFile(path string, data []byte) error {
 	return nil
 }
 
+// ensurePrivateDir creates the runtime directory as 0700 and also tightens a
+// directory left more permissive by an older install (MkdirAll never changes the
+// mode of an existing directory). Windows ignores POSIX modes.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, privateDirPerm); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&^privateDirPerm != 0 {
+		return os.Chmod(dir, privateDirPerm)
+	}
+	return nil
+}
+
+// tightenPrivateFile drops group/other permissions from a runtime file written
+// by an older install. It never widens permissions.
+func tightenPrivateFile(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&^privateFilePerm != 0 {
+		return os.Chmod(path, privateFilePerm)
+	}
+	return nil
+}
+
 func replacementBackup(path string) string {
 	return path + ".replace-old"
 }
@@ -407,14 +444,13 @@ func readRecoverable(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-
 // withPathLock serializes one runtime-state file across goroutines and
 // processes using an atomic O_EXCL lock file. Operations are deliberately
 // short; an old lock is considered abandoned after runtimeLockStale so a
 // crashed process cannot permanently brick Community startup.
 func withPathLock(path string, fn func() error) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, privateDirPerm); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return err
 	}
 
@@ -444,7 +480,6 @@ func withPathLock(path string, fn func() error) error {
 		time.Sleep(runtimeLockRetry)
 	}
 }
-
 
 func abandonedRuntimeLock(lockPath string) bool {
 	raw, err := os.ReadFile(lockPath)
