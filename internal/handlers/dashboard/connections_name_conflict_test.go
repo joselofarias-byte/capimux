@@ -14,6 +14,7 @@ import (
 func TestHandleCreateConnection_NameConflict(t *testing.T) {
 	t.Run("a colliding name is refused with a typed 409", func(t *testing.T) {
 		repo, cleanup := setupTestDB(t)
+		openDashboard(t, repo)
 		defer cleanup()
 		router := setupTestRouter(repo)
 
@@ -60,6 +61,7 @@ func TestHandleCreateConnection_NameConflict(t *testing.T) {
 
 	t.Run("allowOverwrite rewrites the row in place", func(t *testing.T) {
 		repo, cleanup := setupTestDB(t)
+		openDashboard(t, repo)
 		defer cleanup()
 		router := setupTestRouter(repo)
 
@@ -97,6 +99,7 @@ func TestHandleCreateConnection_NameConflict(t *testing.T) {
 
 	t.Run("the legacy overwrite spelling also works", func(t *testing.T) {
 		repo, cleanup := setupTestDB(t)
+		openDashboard(t, repo)
 		defer cleanup()
 		router := setupTestRouter(repo)
 
@@ -109,6 +112,7 @@ func TestHandleCreateConnection_NameConflict(t *testing.T) {
 
 	t.Run("a free name, another auth type, and an explicit id are all unaffected", func(t *testing.T) {
 		repo, cleanup := setupTestDB(t)
+		openDashboard(t, repo)
 		defer cleanup()
 		router := setupTestRouter(repo)
 
@@ -132,6 +136,7 @@ func TestHandleCreateConnection_NameConflict(t *testing.T) {
 // from a different provider.
 func TestGetProviderConnectionByName(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 

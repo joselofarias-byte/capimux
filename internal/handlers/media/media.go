@@ -9,6 +9,7 @@ import (
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
+	"9router/proxy/internal/retrypolicy"
 	"9router/proxy/internal/usagetracker"
 	"bytes"
 	"encoding/base64"
@@ -651,6 +652,12 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 					return
 				} else {
 					lastErr = err.Error()
+					// Non-idempotent: an ambiguous failure (5xx, cut after
+					// sending) may already have created the image, so the
+					// next combo member must not generate it again.
+					if retrypolicy.IsStop(err) {
+						break
+					}
 					continue
 				}
 			}
@@ -731,6 +738,12 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			if err != nil {
 				log.Warn("media", "upstream combo request failed", "endpoint", endpoint, "provider", subInfo.Provider, "model", subInfo.Model, "conn", conn.ID[:min(8, len(conn.ID))], "error", err)
 				lastErr = err.Error()
+				// Billable creation: rotate only when the request provably
+				// never left (DNS, refused, TLS); a timeout or cut after
+				// sending may have created the job upstream.
+				if !retrypolicy.MayRotate(retrypolicy.NonIdempotentMedia(endpoint), 0, err) {
+					break
+				}
 				continue
 			}
 			if resp.StatusCode >= 400 {
@@ -742,9 +755,10 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 				}
 				log.Warn("media", "upstream combo error", "endpoint", endpoint, "provider", subInfo.Provider, "model", subInfo.Model, "conn", conn.ID[:min(8, len(conn.ID))], "status", resp.StatusCode, "body", errText)
 				// Upstream parity (videoGeneration CREATE_ROTATION_STATUSES):
-				// billable video creation must not rotate on 5xx — the job
-				// may already exist upstream. Auth/quota errors rotate.
-				if isVideoCreateEndpoint(endpoint) && resp.StatusCode >= 500 {
+				// billable creation (video and, since retrypolicy, images)
+				// must not rotate on 5xx — the job may already exist
+				// upstream. Auth/quota errors rotate.
+				if !retrypolicy.MayRotate(retrypolicy.NonIdempotentMedia(endpoint), resp.StatusCode, nil) {
 					lastErr = fmt.Sprintf("upstream status %d: %s", resp.StatusCode, errText[:min(200, len(errText))])
 					lastStatus = resp.StatusCode
 					break

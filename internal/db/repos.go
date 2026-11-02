@@ -118,6 +118,23 @@ func (r *Repo) NextConnectionPriority(provider string) (int, error) {
 	return int(maxPriority.Int64) + 1, nil
 }
 
+// LastConnectionPriority returns a priority that sorts after every existing
+// connection of the provider, using the same ordering as
+// GetProviderConnections (a NULL priority sorts as 999999). A row created with
+// it never moves ahead of an existing one.
+func (r *Repo) LastConnectionPriority(provider string) (int, error) {
+	var maxPriority sql.NullInt64
+	if err := r.db.QueryRow(
+		`SELECT MAX(CASE WHEN priority IS NULL THEN 999999 ELSE priority END) FROM providerConnections WHERE provider = ?`, provider,
+	).Scan(&maxPriority); err != nil {
+		return 0, fmt.Errorf("last connection priority for %s: %w", provider, err)
+	}
+	if !maxPriority.Valid {
+		return 1, nil
+	}
+	return int(maxPriority.Int64) + 1, nil
+}
+
 // GetProviderConnectionByName returns the apikey connection carrying this
 // (provider, authType, name), or nil when the name is free. Apikey connections
 // are the ones deduped by name: oauth and access_token rows are identified by

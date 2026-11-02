@@ -84,8 +84,11 @@
     { tab: 'connections' as ActiveTab, label: 'Providers', icon: 'dns' },
     { tab: 'combos' as ActiveTab, label: 'Combo & Vision Adapter', icon: 'layers' },
     { tab: 'multiagent' as ActiveTab, label: 'Multiagente', icon: 'hub' },
+    { tab: 'prompt-injection' as ActiveTab, label: 'Inyección de prompts', icon: 'edit_note' },
+    { tab: 'playground' as ActiveTab, label: 'Playground', icon: 'science' },
     { tab: 'analytics' as ActiveTab, label: 'Usage', icon: 'bar_chart' },
     { tab: 'quota' as ActiveTab, label: 'Quota Tracker', icon: 'data_usage' },
+    { tab: 'key-quotas' as ActiveTab, label: 'Cuotas por API key', icon: 'speed' },
     { tab: 'token-saver' as ActiveTab, label: 'Token Saver', icon: 'savings' },
     { tab: 'cli-tools' as ActiveTab, label: 'CLI Tools', icon: 'terminal' },
   ] as const

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -17,7 +18,9 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/log"
+	"9router/proxy/internal/promptinject"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/tokensaver"
@@ -122,6 +125,17 @@ func (h *ChatHandler) handleAccountFallback(
 		if err != nil || connObj == nil {
 			continue
 		}
+		// c.ID is passed as a pin, and an ineligible pin (account cooldown,
+		// model lock, quota cache, strict assignment) falls through to the
+		// strategy, which returns a different account. Serving that one here
+		// would run its credentials under c's ID: a success cleared the
+		// cooldown of the exhausted account c, and every cooled row re-sent
+		// the request to the same healthy account. Skip c; the account the
+		// strategy picked gets its own turn in this loop.
+		if connObj.ID != c.ID {
+			log.Debug("fallback", "skip ineligible connection", "conn", c.ID, "strategyPick", connObj.ID)
+			continue
+		}
 		apiKey := extractAPIKey(connData)
 		if apiKey == "" {
 			providerCfg, pErr := h.getProviderConfig(provider, connData)
@@ -148,7 +162,20 @@ func (h *ChatHandler) handleAccountFallback(
 			return lastErr
 		}
 		var ue *upstreamError
-		if errors.As(lastErr, &ue) && providers.RetryableStatusCodes[ue.StatusCode] {
+		errors.As(lastErr, &ue)
+		decision, reason, lockAccount := upstreamHopPlan(lastErr)
+		if reason == "empty_completion" && ue != nil {
+			// Empty output is model-scoped. Try another account for this
+			// model without recording a quota cooldown.
+			if lockErr := h.Repo.LockConnectionModel(connObj.ID, model, 30, 0); lockErr != nil {
+				log.Warn("fallback", "empty model lock failed", "conn", connObj.ID, "error", lockErr)
+			}
+			log.Info("fallback", "empty completion; trying next eligible account",
+				"conn", c.ID, "provider", provider, "model", model, "reason", reason)
+			excludeIDs = append(excludeIDs, c.ID)
+			continue
+		}
+		if decision == "next_account" && lockAccount && ue != nil {
 			// Extract error text from upstream body for classification
 			errorText := extractErrorText(ue.Body)
 			// Get current backoff level from this connection
@@ -156,10 +183,6 @@ func (h *ChatHandler) handleAccountFallback(
 			// Classify error to get dynamic cooldown
 			classification := providers.ClassifyError(ue.StatusCode, errorText, currentBackoffLevel)
 			cooldownSec := retryableCooldownSec(ue.StatusCode, time.Duration(classification.CooldownMs)*time.Millisecond, ue)
-			errMsg := errorText
-			if errMsg == "" {
-				errMsg = fmt.Sprintf("%d upstream error", ue.StatusCode)
-			}
 			lockKey := canonicalLockModel(provider, model)
 			h.Repo.LockConnectionModel(connObj.ID, lockKey, cooldownSec, classification.NewBackoffLevel)
 			if lockKey != model {
@@ -175,15 +198,15 @@ func (h *ChatHandler) handleAccountFallback(
 			log.Warn("fallback", "connection locked", append([]any{
 				"conn", connObj.ID, "provider", provider, "model", model,
 				"lockKey", lockKey, "status", ue.StatusCode, "cooldown_s", cooldownSec,
+				"reason", reason,
 			}, connIdentityKV(connObj)...)...)
 			excludeIDs = append(excludeIDs, c.ID)
 			continue
 		}
-		if accountTransientFailure(lastErr) {
-			// A transient 500 or transport failure is not a quota error.
-			// Do not persist a rate-limit lock; try a different account once.
+		if decision == "next_account" {
+			// 500, 408, transport and per-hop timeouts are not quota.
 			log.Warn("fallback", "transient failure; trying next eligible account",
-				"conn", c.ID, "provider", provider, "model", model)
+				"conn", c.ID, "provider", provider, "model", model, "reason", reason)
 			continue
 		}
 		return lastErr
@@ -539,6 +562,8 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		DurationMs: latencyMs,
 		TTFTMs:     metrics.TTFT,
 	})
+	// Provider/model health for the opt-in "health" combo strategy.
+	recordComboHealth(ctx, provider, model, completed, fwdErr, latencyMs)
 
 	usage := translator.GetAndClearUsage(ctx)
 	if completed {
@@ -571,7 +596,15 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 			APIKey:       apiKey,
 			Endpoint:     endpoint,
 		}
-		h.logUsage(logInfo, usage, latencyMs, body, metrics)
+		if usage.PromptTokens == 0 && promptinject.Injected(ctx) && len(body) > 0 {
+			// Estimate from the body really sent (with the injected
+			// instructions) before the log copy is scrubbed.
+			usage.PromptTokens = max(CountValueChars(body)/4, 1)
+		}
+		h.logUsage(logInfo, usage, latencyMs, promptinject.ScrubForLog(ctx, body), metrics)
+		// Per-key token quotas (no-op unless enabled): logUsage has already
+		// filled in estimated tokens when the upstream reported none.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
 		fwdErr = nil
 		return nil
 	}
@@ -593,9 +626,13 @@ func (h *ChatHandler) tryForwardWithConnection(f forwardRequestParams) error {
 		usage,
 		fwdErr,
 		latencyMs,
-		body,
+		promptinject.ScrubForLog(ctx, body),
 		metrics,
 	)
+	if usage != nil {
+		// Tokens a failed or aborted stream already consumed still count.
+		keyquota.AddTokens(ctx, int64(usage.PromptTokens+usage.CompletionTokens))
+	}
 	if isClientCanceled(ctx, fwdErr) {
 		log.Info("fallback", "client canceled request", "provider", provider, "model", model, "conn", connectionID)
 	} else if projectProbeCached(connectionID) {
@@ -783,32 +820,56 @@ func extractRetryAfter(body []byte) string {
 	if dur, ok := extractResetDuration(body); ok {
 		return time.Now().UTC().Add(dur).Format(time.RFC3339)
 	}
+	// Each field may be a string (RFC3339, "120s", "120") or a bare JSON
+	// number of seconds. Typed as string, a single numeric field made the
+	// whole decode fail, so every wait in the body was lost, including the
+	// error.retry_after/reset_at pair this router itself sends to clients
+	// (a chained Capimux/9router upstream).
 	var parsed struct {
-		RetryAfter string `json:"retryAfter"`
-		RetryAlt   string `json:"retry_after"`
-		ResetsAt   string `json:"resetsAt"`
-		ResetsAlt  string `json:"resets_at"`
+		RetryAfter any `json:"retryAfter"`
+		RetryAlt   any `json:"retry_after"`
+		ResetsAt   any `json:"resetsAt"`
+		ResetsAlt  any `json:"resets_at"`
 		Error      struct {
-			RetryAfter string `json:"retryAfter"`
+			RetryAfter any `json:"retryAfter"`
+			RetryAlt   any `json:"retry_after"`
+			ResetAt    any `json:"reset_at"`
+			ResetsAt   any `json:"resetsAt"`
+			ResetsAlt  any `json:"resets_at"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return ""
 	}
-	if parsed.RetryAfter != "" {
-		return parsed.RetryAfter
+	for _, v := range []any{
+		parsed.RetryAfter, parsed.RetryAlt, parsed.ResetsAt, parsed.ResetsAlt,
+		parsed.Error.RetryAfter, parsed.Error.RetryAlt, parsed.Error.ResetAt, parsed.Error.ResetsAt, parsed.Error.ResetsAlt,
+	} {
+		if s := retryFieldString(v); s != "" {
+			return s
+		}
 	}
-	if parsed.RetryAlt != "" {
-		return parsed.RetryAlt
-	}
-	if parsed.ResetsAt != "" {
-		return parsed.ResetsAt
-	}
-	if parsed.ResetsAlt != "" {
-		return parsed.ResetsAlt
-	}
-	if parsed.Error.RetryAfter != "" {
-		return parsed.Error.RetryAfter
+	return ""
+}
+
+// retryFieldString normalises one retry/reset field to the string forms
+// parseRetryAfterValue reads. A number is seconds; zero, negative,
+// NaN carry no usable wait, and a huge one is held to maxResetCooldown.
+func retryFieldString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case float64:
+		if !(t > 0) {
+			return ""
+		}
+		// Clamped like every other cooldown; it also keeps the int64
+		// conversion below from overflowing.
+		t = min(t, maxResetCooldown.Seconds())
+		if t == math.Trunc(t) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64) + "s"
 	}
 	return ""
 }
@@ -862,18 +923,22 @@ func claudeSessionIDFromBody(body []byte) string {
 	return extractClaudeSessionIdFromUserId(userID)
 }
 
-
 // accountTransientFailure admits one new account only for errors plausibly
 // tied to an unhealthy upstream account or its transport. It MUST be checked
 // after verifying the response was not committed and the caller is still live.
 // Business/API request errors (400, 401 etc.) do not enter this path.
+// A per-hop deadline is transient; the caller context is checked by the
+// fallback loop before this function runs.
 func accountTransientFailure(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	var ue *upstreamError
 	if errors.As(err, &ue) {
-		return ue.StatusCode == http.StatusInternalServerError
+		return ue.StatusCode == http.StatusInternalServerError || ue.StatusCode == http.StatusRequestTimeout
 	}
 	var networkErr net.Error
 	return errors.As(err, &networkErr) ||

@@ -154,7 +154,10 @@ func TestProviders(t *testing.T) {
 	license := &License{
 		LicenseID: "beta-x",
 		Channel:   "beta",
-		ExpiresAt: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+		// Relative to the real clock: the provider checks expiry against
+		// time.Now, so a fixed date turns this test red once it passes
+		// (it broke at 2026-11-01T00:00Z).
+		ExpiresAt: time.Now().UTC().Add(365 * 24 * time.Hour),
 		Features:  []Capability{CapabilityAdvancedRouting},
 	}
 	var licensed Provider = NewLicenseProvider(license)
