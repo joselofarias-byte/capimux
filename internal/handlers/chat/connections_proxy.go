@@ -7,6 +7,7 @@ import (
 	"9router/proxy/internal/log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -69,12 +70,8 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) *http.Cli
 	var proxyType string
 	// Strictness comes from the connection, its provider-specific data, or the
 	// pool. Any of them set means the request must never go out directly.
-	strictProxy := connData.StrictProxy
-	if connData.ProviderSpecificData != nil {
-		if sp, ok := connData.ProviderSpecificData["strictProxy"].(bool); ok && sp {
-			strictProxy = true
-		}
-	}
+	strictProxy := connectionStrictProxy(connData)
+	var relayPoolURLs []string
 
 	// 1. Resolve from ProxyPool. Read strictness even for inactive pools so an
 	// explicit strict policy cannot silently turn into direct egress.
@@ -93,6 +90,9 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) *http.Cli
 			} else {
 				proxyURLStr = pool.NextURL()
 				proxyType = pool.Type
+				if isEdgeRelayType(pool.Type) {
+					relayPoolURLs = pool.URLs
+				}
 				if proxyURLStr == "" && strictProxy {
 					return h.strictProxyFailClosed(connData.ProxyPoolID, "strict proxy pool %q has no usable URL", connData.ProxyPoolID)
 				}
@@ -179,7 +179,13 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) *http.Cli
 
 	// For supported Edge Relays, the standard client is intentional because URL
 	// rewriting and x-relay headers are handled at request time.
-	if proxyType == "vercel" || proxyType == "cloudflare" || proxyType == "deno" {
+	// Under strictProxy the client is restricted to the relay hosts, so a
+	// caller that did not rewrite its URL (for example after a provider-config
+	// error) can never egress directly to the upstream.
+	if isEdgeRelayType(proxyType) {
+		if strictProxy {
+			return h.strictRelayClient(connData.ProxyPoolID, relayPoolURLs)
+		}
 		return h.Client
 	}
 	// Unknown proxy types must never silently bypass a strict proxy policy.
@@ -188,4 +194,69 @@ func (h *ChatHandler) getClientForConnection(connData *ConnectionData) *http.Cli
 	}
 	log.Warn("proxy", "unsupported proxy type; using direct client because strict proxy is disabled", "type", proxyType)
 	return h.Client
+}
+
+// connectionStrictProxy reports whether the connection itself (top-level field
+// or providerSpecificData.strictProxy) requires a proxy. The pool's own
+// strictProxy flag is merged in by the callers that load the pool.
+func connectionStrictProxy(connData *ConnectionData) bool {
+	if connData == nil {
+		return false
+	}
+	if connData.StrictProxy {
+		return true
+	}
+	if connData.ProviderSpecificData != nil {
+		if sp, ok := connData.ProviderSpecificData["strictProxy"].(bool); ok && sp {
+			return true
+		}
+	}
+	return false
+}
+
+// isEdgeRelayType reports whether a proxy pool type is an edge relay
+// (requests are rewritten to the relay URL instead of dialing a proxy).
+func isEdgeRelayType(proxyType string) bool {
+	return proxyType == "vercel" || proxyType == "cloudflare" || proxyType == "deno"
+}
+
+// relayHostGuard only lets requests reach the configured edge relay hosts.
+// Any other host would be direct egress, which a strict proxy policy forbids.
+type relayHostGuard struct {
+	base  http.RoundTripper
+	hosts map[string]struct{}
+}
+
+func (g relayHostGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, fmt.Errorf("strict proxy: request without URL")
+	}
+	if _, ok := g.hosts[strings.ToLower(req.URL.Host)]; !ok {
+		return nil, fmt.Errorf("strict proxy: refusing direct request to %q outside the edge relay", req.URL.Host)
+	}
+	return g.base.RoundTrip(req)
+}
+
+func (h *ChatHandler) strictRelayClient(poolID string, relayURLs []string) *http.Client {
+	hosts := make(map[string]struct{}, len(relayURLs))
+	for _, raw := range relayURLs {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		hosts[strings.ToLower(u.Host)] = struct{}{}
+	}
+	if len(hosts) == 0 {
+		return h.strictProxyFailClosed(poolID, "strict edge relay pool %q has no valid relay URL", poolID)
+	}
+	base := h.Client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &http.Client{
+		Transport:     relayHostGuard{base: base, hosts: hosts},
+		Timeout:       h.Client.Timeout,
+		CheckRedirect: h.Client.CheckRedirect,
+		Jar:           h.Client.Jar,
+	}
 }
