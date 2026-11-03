@@ -7,6 +7,7 @@ export type ActiveTab =
   | 'analytics'
   | 'quota'
   | 'key-quotas'
+  | 'deepseek-web'
   | 'token-saver'
   | 'cli-tools'
   | 'media-embedding'
@@ -34,6 +35,7 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   analytics: '/dashboard/usage',
   quota: '/dashboard/quota',
   'key-quotas': '/dashboard/key-limits',
+  'deepseek-web': '/dashboard/deepseek-web',
   'token-saver': '/dashboard/token-saver',
   'cli-tools': '/dashboard/cli-tools',
   'media-embedding': '/dashboard/media-providers/embedding',
@@ -88,6 +90,9 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
 
   // per-key quotas
   '/dashboard/key-limits': 'key-quotas',
+
+  // DeepSeek Web sessions (admin)
+  '/dashboard/deepseek-web': 'deepseek-web',
 
   // quota tracker
   '/dashboard/quota': 'quota',

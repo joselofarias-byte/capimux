@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"9router/proxy/internal/auth"
 	"9router/proxy/internal/deepseekprofile"
+	"9router/proxy/internal/deepseekweb"
+	"9router/proxy/internal/log"
 )
 
 // The DeepSeek profile through the real router (auth middleware, routes,
@@ -58,6 +63,7 @@ func TestDeepSeekProfile_StreamFallsBackOnlyBeforeStart(t *testing.T) {
 	})
 	enableDeepSeekProfile(t, dsh.URL, inf.URL)
 	env := newEnv(t)
+	connectWebSessionAndEnableFallback(t, env)
 
 	res := env.Post(t, "/v1/chat/completions", ChatBody(deepseekprofile.DefaultModelID, true))
 	if res.Status != http.StatusOK || !strings.Contains(string(res.Body), "desde inferx") || !strings.Contains(string(res.Body), "[DONE]") {
@@ -108,4 +114,98 @@ func TestDeepSeekProfile_DisabledLeavesRouterAsBefore(t *testing.T) {
 		t.Fatalf("regular route: %d %s", res.Status, truncate(res.Body))
 	}
 	_ = upstream
+}
+
+// Fake DeepSeek Web session credential, test only; the checker is a mock.
+const integrationFakeWebSession = "fake-dsh-web-session-NOT-REAL-integration"
+
+type mockWebChecker struct{}
+
+func (mockWebChecker) Check(_ context.Context, _ string, cred []byte) deepseekweb.CheckResult {
+	if string(cred) == integrationFakeWebSession {
+		return deepseekweb.CheckResult{Status: deepseekweb.StatusConnected}
+	}
+	return deepseekweb.CheckResult{Status: deepseekweb.StatusError, Detail: "rechazada"}
+}
+
+func useMockWebSessions(t *testing.T) *deepseekweb.Manager {
+	t.Helper()
+	m, err := deepseekweb.Open(deepseekweb.Options{Dir: t.TempDir(), Checker: mockWebChecker{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepseekweb.SetDefault(m)
+	t.Cleanup(func() { deepseekweb.SetDefault(nil) })
+	return m
+}
+
+func adminCLI() RequestOpt { return WithHeader(auth.CLITokenHeader, auth.CLIToken()) }
+
+// connectWebSessionAndEnableFallback goes through the admin API exactly as the
+// panel does: add a session, check it (mock), then enable the InferX toggle.
+func connectWebSessionAndEnableFallback(t *testing.T, env *Env) {
+	t.Helper()
+	useMockWebSessions(t)
+	res := env.Post(t, "/api/admin/deepseek-web/sessions", map[string]any{"label": "integración", "credential": integrationFakeWebSession}, WithoutAPIKey(), adminCLI())
+	if res.Status != http.StatusCreated {
+		t.Fatalf("create session: %d %s", res.Status, truncate(res.Body))
+	}
+	var s deepseekweb.SessionInfo
+	_ = json.Unmarshal(res.Body, &s)
+	if res = env.Post(t, "/api/admin/deepseek-web/sessions/"+s.ID+"/check", nil, WithoutAPIKey(), adminCLI()); res.Status != http.StatusOK {
+		t.Fatalf("check: %d", res.Status)
+	}
+	if res = env.Put(t, "/api/admin/deepseek-web/fallback", map[string]any{"enabled": true}, WithoutAPIKey(), adminCLI()); res.Status != http.StatusOK || !strings.Contains(string(res.Body), `"effective":true`) {
+		t.Fatalf("fallback toggle: %d %s", res.Status, truncate(res.Body))
+	}
+}
+
+func TestDeepSeekWeb_AdminAPIRejectsEngineKeysEvenWithOpenDashboard(t *testing.T) {
+	env := newEnv(t)
+	m := useMockWebSessions(t)
+	if err := env.Repo.UpdateSettingsRaw(map[string]any{"requireLogin": false}); err != nil {
+		t.Fatal(err)
+	}
+	for _, opt := range []RequestOpt{WithAPIKey(env.APIKey), WithoutAPIKey(), WithAPIKey("sk-infer-fake")} {
+		if res := env.Get(t, "/api/admin/deepseek-web/sessions", opt); res.Status != http.StatusUnauthorized {
+			t.Fatalf("list: %d", res.Status)
+		}
+		if res := env.Post(t, "/api/admin/deepseek-web/sessions", map[string]any{"label": "x", "credential": integrationFakeWebSession}, opt); res.Status != http.StatusUnauthorized {
+			t.Fatalf("create: %d", res.Status)
+		}
+		if res := env.Put(t, "/api/admin/deepseek-web/fallback", map[string]any{"enabled": true}, opt); res.Status != http.StatusUnauthorized {
+			t.Fatalf("fallback: %d", res.Status)
+		}
+	}
+	if len(m.List()) != 0 || m.Fallback().Requested {
+		t.Fatal("engine key changed DeepSeek Web state")
+	}
+}
+
+func TestDeepSeekWeb_NoFallbackWithoutToggleAndSecretsStayOut(t *testing.T) {
+	dsh := newCountingServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	inf := newCountingServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	enableDeepSeekProfile(t, dsh.URL, inf.URL)
+	env := newEnv(t)
+	useMockWebSessions(t)
+	log.ClearConsoleLogs()
+	res := env.Post(t, "/api/admin/deepseek-web/sessions", map[string]any{"label": "a", "credential": integrationFakeWebSession}, WithoutAPIKey(), adminCLI())
+	var s deepseekweb.SessionInfo
+	_ = json.Unmarshal(res.Body, &s)
+	env.Post(t, "/api/admin/deepseek-web/sessions/"+s.ID+"/check", nil, WithoutAPIKey(), adminCLI())
+	// Connected session but no explicit toggle: InferX is not used.
+	if res := env.Post(t, "/v1/chat/completions", ChatBody(deepseekprofile.DefaultModelID, false)); res.Status != http.StatusServiceUnavailable || inf.hits.Load() != 0 {
+		t.Fatalf("status %d inferx=%d", res.Status, inf.hits.Load())
+	}
+	list := env.Get(t, "/api/admin/deepseek-web/sessions", WithoutAPIKey(), adminCLI())
+	for _, b := range [][]byte{res.Body, list.Body} {
+		if strings.Contains(string(b), integrationFakeWebSession) {
+			t.Fatal("credential in a response")
+		}
+	}
+	for _, l := range log.ConsoleLogs() {
+		if strings.Contains(l, integrationFakeWebSession) {
+			t.Fatal("credential in logs")
+		}
+	}
 }

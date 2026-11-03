@@ -34,6 +34,8 @@ describe('router', () => {
     expect(TAB_ROUTES.quota).toBe('/dashboard/quota')
     expect(TAB_ROUTES['key-quotas']).toBe('/dashboard/key-limits')
     expect(pathToTab('/dashboard/key-limits')).toBe('key-quotas')
+    expect(TAB_ROUTES['deepseek-web']).toBe('/dashboard/deepseek-web')
+    expect(pathToTab('/dashboard/deepseek-web')).toBe('deepseek-web')
     expect(TAB_ROUTES['token-saver']).toBe('/dashboard/token-saver')
     expect(TAB_ROUTES['cli-tools']).toBe('/dashboard/cli-tools')
     expect(TAB_ROUTES['prompt-injection']).toBe('/dashboard/prompt-injection')
