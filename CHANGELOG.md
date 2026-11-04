@@ -66,6 +66,8 @@
 
 - Free Best keeps failover inside eligible free or free-tier routes. 401, 403, 402 and 429 cool down the failed account and try the next eligible account; 500, 408, transport errors and per-hop timeouts move on without a quota lock; a 400/404 tries each account of the model once, without a lock or exclusion, and then the next provider (main's contract from #157); an empty completion is not success; a partial stream is not replayed. Virtual names are listed only when a route exists. `GET /api/admin/free-best` explains the choice without credentials. Base is main `e3a2de8`, not `feat/free-best-dynamic-routing`.
 
+- Android beta 0.1.1 replaces manual comparator model IDs with a searchable provider-grouped checklist, remembers up to eight selections and applies changes without restarting the engine. The picker uses the connected/noAuth catalog through an admin-only API. Intentional Capimux fork extension.
+
 - Capimux adds a multimodel comparator with a server-backed model picker, independent ordered results, cancellation and bounded non-streaming responses. Both comparator APIs always require an admin session or local CLI token. Provider dispatch remains opt-in with an exact model allowlist; simulated runs never call providers. Deliberate fork extension beyond decolua/9router.
 
 - Codex OAuth can now delegate login end-to-end to the installed Codex CLI (AnyClaw-style): the CLI owns PKCE, the fixed loopback callback and token exchange inside an isolated temporary `CODEX_HOME`; 9router imports the completed account without exposing credentials in dashboard responses or logs. The existing in-process PKCE flow remains as a fallback when Codex CLI is unavailable. This is an intentional fork improvement beyond current decolua/9router parity.
