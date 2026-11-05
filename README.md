@@ -195,8 +195,8 @@ HOST=127.0.0.1 ./9router-go                     # localhost only, behind a rever
 ### 🔑 Dashboard Login & Fresh Install
 
 - **Localhost (`localhost` / `127.0.0.1`)**: First login uses the default compatibility password `123456`. Once logged in, change your password in **Settings → Profile**.
+- **Remote / VPS / Docker / LAN**: For security (preventing public takeover of fresh installs with known defaults, CVE-2026-56679), remote access blocks the default `123456` password. You **must** either:
   1. **Set `INITIAL_PASSWORD` on launch (Recommended)**:
-     ```bash
      INITIAL_PASSWORD="your-secure-password" ./9router-go
      # Or in your .env file:
      # INITIAL_PASSWORD=your-secure-password
