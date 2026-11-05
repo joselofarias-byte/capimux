@@ -15,7 +15,7 @@ type Policy struct {
 }
 
 func currentPolicy() Policy {
-	p := Policy{Models: []string{}, ExternalEnabled: os.Getenv("CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL") == "1", MaxModels: 8, MaxOutputTokens: 4096}
+	p := Policy{Models: []string{}, ExternalEnabled: os.Getenv("CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL") == "1", MaxModels: maxModels, MaxOutputTokens: 4096}
 	seen := make(map[string]bool)
 	for _, raw := range strings.Split(os.Getenv("CAPIMUX_MULTIAGENT_ALLOWED_MODELS"), ",") {
 		model := strings.TrimSpace(raw)
