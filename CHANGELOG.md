@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+- Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
+- Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
+- Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
+
 - Seguridad (auditoría fase 1, partes pendientes de #130, rama `fix/audit-phase1-main`): hay cuatro opt-in nuevos, apagados por defecto: `CAPIMUX_EXPLAIN_ROUTE_STRICT_POLICY` (`explain-route` responde 400 a políticas desconocidas), `CAPIMUX_STRICT_CONTROLPLANE_INIT` (el arranque falla si no cargan el registry o las cuentas), `CAPIMUX_DISCOVERY_PRESERVE_ACCOUNTS` (el snapshot de discovery no pisa las cuentas en memoria) y `CAPIMUX_DISCOVERY_STRICT_PRICING` (un costo positivo en OrcaRouter siempre es `paid`). El alcance de las cinco partes está en `docs/audit-phase1-pending.es.md`.
 - Seguridad (auditoría fase 1, #130): el refresh OAuth de Claude, xAI y del flujo estándar rechaza respuestas de más de 1 MiB (antes leía el cuerpo entero a memoria). Con `strictProxy` activo (en el pool, la conexión o `providerSpecificData`) una conexión ya no sale directo si el proxy no se puede usar: pool inexistente, inactivo o sin URL, URL inválida o tipo de proxy desconocido devuelven un cliente que falla cerrado; sin `strictProxy` el comportamiento no cambia. El caché de pools se refresca si la fila cambió en la base y la rotación round-robin arranca por la primera URL. El uso de `/v1/messages` de modelo único se registra con endpoint `/v1/messages` en vez de `/v1/v1/messages`.
 
