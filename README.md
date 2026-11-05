@@ -1,15 +1,15 @@
 <div align="center">
 
-# 9router-go — FREE AI Router & Token Saver (Single Binary)
+# Capimux — JolufaSoft AI Router (binario Go)
 
-**Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
+**Orquestación de modelos, cuentas, reglas de respaldo y ahorro de tokens mediante RTK.**
 
-**Connect Claude Code, Cursor, Antigravity, Codex, Gemini, OpenCode, Cline, OpenClaw... to 40+ AI providers & 100+ models — no Node.js needed at runtime.**
+**Router autohospedado compatible con múltiples clientes y proveedores, con panel integrado y sin Node.js en ejecución.**
 
-[![CI](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/ci.yml)
-[![Release](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml/badge.svg)](https://github.com/luqman-v1/9router-go/actions/workflows/release.yml)
-[![GitHub release](https://img.shields.io/github/v/release/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/releases/latest)
-[![License](https://img.shields.io/github/license/luqman-v1/9router-go)](https://github.com/luqman-v1/9router-go/blob/main/LICENSE)
+[![CI](https://github.com/joselofarias-byte/capimux/actions/workflows/ci.yml/badge.svg)](https://github.com/joselofarias-byte/capimux/actions/workflows/ci.yml)
+[![Release](https://github.com/joselofarias-byte/capimux/actions/workflows/release.yml/badge.svg)](https://github.com/joselofarias-byte/capimux/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/joselofarias-byte/capimux)](https://github.com/joselofarias-byte/capimux/releases)
+[![License](https://img.shields.io/github/license/joselofarias-byte/capimux)](https://github.com/joselofarias-byte/capimux/blob/main/LICENSE)
 
 [🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [⚙️ Setup](#-setup-guide) • [🌐 Upstream](https://github.com/decolua/9router)
 
@@ -17,7 +17,7 @@
 
 ---
 
-## 🤔 Why 9router-go?
+## 🤔 ¿Qué es Capimux?
 
 Same idea as [9Router](https://github.com/decolua/9router), minus the Node.js runtime: **one Go binary** serves the proxy APIs + an embedded Svelte dashboard.
 
@@ -35,7 +35,7 @@ See [Product strategy (ES)](docs/PRODUCT_STRATEGY.es.md) and [Ecosystem strategy
 - ❌ Tool outputs (git diff, grep, ls...) burn tokens fast
 - ❌ Manual switching between providers
 
-**9router-go solves this:**
+**Capimux aborda estos escenarios:**
 
 - ✅ **RTK Token Saver** — auto-compress tool_result content, save 20-40% tokens
 - ✅ **Auto fallback** — Subscription → Cheap → Free, zero downtime
@@ -54,7 +54,7 @@ See [Product strategy (ES)](docs/PRODUCT_STRATEGY.es.md) and [Ecosystem strategy
        │ http://localhost:20130/v1
        ↓
 ┌─────────────────────────────────────────────┐
-│         9router-go (Smart Router)           │
+│         Capimux (9router-go binary)         │
 │  • RTK Token Saver (cut tool_result tokens) │
 │  • Format translation (OpenAI ↔ Claude)     │
 │  • Quota tracking                           │
@@ -74,17 +74,16 @@ Result: Never stop coding, minimal cost + 20-40% token savings via RTK
 
 ## ⚡ Quick Start
 
-**1. Install (one line):**
+**1. Compilar desde el fork (hasta que exista una release etiquetada):**
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.sh | bash
+git clone https://github.com/joselofarias-byte/capimux.git
+cd capimux
+make web-build
+make build
 ```
 
-```powershell
-# Windows (PowerShell, no admin needed)
-irm https://raw.githubusercontent.com/luqman-v1/9router-go/main/install.ps1 | iex
-```
+> Los instaladores `install.sh` / `install.ps1` todavía usan el repositorio previo como predeterminado: no deben presentarse como instaladores de Capimux hasta corregirlos y validar una release. Revisá siempre cualquier script antes de ejecutarlo.
 
 🎉 Then start it (defaults: port `20130`, data `~/.9router` — no flags needed):
 
@@ -114,7 +113,7 @@ leaves nothing behind: the stale pid file is cleaned on the next command.
 
 **2. Connect a FREE provider (no signup needed):**
 
-Dashboard → Providers → Connect **Kiro AI** (~50 credits/month free) or **OpenCode Free** (no auth) → Done!
+Dashboard → Providers → configurar una conexión autorizada. La disponibilidad y cuotas dependen de cada proveedor.
 
 **3. Use in your CLI tool:**
 
@@ -125,12 +124,12 @@ Claude Code / Codex / OpenClaw / Cursor / Cline Settings:
   Model:    kr/claude-sonnet-4.5
 ```
 
-**That's it!** Start coding with FREE AI models.
+**Listo:** verificá los modelos disponibles en la instalación y su conectividad.
 
 **Alternatives:**
 
 ```bash
-# Docker — no build needed
+# Docker — ejemplo para cuando exista una imagen publicada en GHCR
 docker run -d --name 9router-go --restart unless-stopped \
   -p 20130:20130 -v "$HOME/.9router:/data" \
   -e PORT=20130 -e DATA_DIR=/data \
@@ -142,7 +141,7 @@ docker run -d --name 9router-go --restart unless-stopped \
 # Linux VPS → linux-amd64 | Raspberry Pi → linux-arm64
 ```
 
-📦 [All release binaries](https://github.com/luqman-v1/9router-go/releases/latest) • 🔨 [Build from source](#-setup-guide)
+📦 [All release binaries](https://github.com/joselofarias-byte/capimux/releases) • 🔨 [Build from source](#-setup-guide)
 
 ---
 
@@ -161,15 +160,15 @@ docker run -d --name 9router-go --restart unless-stopped \
 
 ### Release binary
 
-Download from [GitHub Releases](https://github.com/luqman-v1/9router-go/releases/latest), verify against `SHA256SUMS.txt`.
+Las futuras versiones oficiales se publicarán en [Capimux Releases](https://github.com/joselofarias-byte/capimux/releases). **Aún no hay una release etiquetada confirmada**: no suponer que `/releases/latest` ni la imagen Docker `:latest` están disponibles. Al publicarla, verificar los checksums y el manifest firmado antes de instalar.
 
 ### Build from source
 
 Prerequisites: Go 1.27 and Bun 1.x (dashboard is embedded into the binary, so build web first):
 
 ```bash
-git clone https://github.com/luqman-v1/9router-go.git
-cd 9router-go
+git clone https://github.com/joselofarias-byte/capimux.git
+cd capimux
 make web-build   # bun install --frozen-lockfile && bun run build
 make build       # embeds VERSION into the Go binary
 ```
@@ -198,7 +197,6 @@ HOST=127.0.0.1 ./9router-go                     # localhost only, behind a rever
 - **Localhost (`localhost` / `127.0.0.1`)**: First login uses the default compatibility password `123456`. Once logged in, change your password in **Settings → Profile**.
 - **Remote / VPS / Docker / LAN**: For security (preventing public takeover of fresh installs with known defaults, CVE-2026-56679), remote access blocks the default `123456` password. You **must** either:
   1. **Set `INITIAL_PASSWORD` on launch (Recommended)**:
-     ```bash
      INITIAL_PASSWORD="your-secure-password" ./9router-go
      # Or in your .env file:
      # INITIAL_PASSWORD=your-secure-password
@@ -282,6 +280,10 @@ Go reads/writes the upstream 9router table/JSON shapes and bootstraps the core s
 - [`ROADMAP.md`](ROADMAP.md) — proposals only, not current behavior
 - [`CHANGELOG.md`](CHANGELOG.md) — release history (Go **v1.9.6**, upstream baseline `decolua/9router` v0.5.85)
 
-## Credits
+## Créditos y procedencia
 
-- [9Router](https://github.com/decolua/9router) — original Next.js gateway & dashboard this Go port preserves compatibility with
+- [9Router](https://github.com/decolua/9router) — proyecto original; Capimux conserva compatibilidad con formatos y datos cuando corresponde.
+- [luqman-v1/9router-go](https://github.com/luqman-v1/9router-go) — port previo en Go y Svelte del que deriva este fork.
+- [JolufaSoft / Capimux](https://github.com/joselofarias-byte/capimux) — desarrollo y mantenimiento de este fork.
+
+Se mantienen los avisos y condiciones de licencia en [LICENSE](LICENSE).
