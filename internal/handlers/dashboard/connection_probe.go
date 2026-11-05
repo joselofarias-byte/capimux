@@ -108,7 +108,7 @@ var connectionProbeDo = func(ctx context.Context, client *http.Client, method, r
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
-	if isProxyFailure(err, resp) {
+	if isProxyFailure(err, resp) && !isStrictProbeClient(client) {
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -311,7 +311,12 @@ func parseConnectionProbeData(raw map[string]any) connectionProbeData {
 // testSingleConnection mirrors testSingleConnection(id): resolve the proxy,
 // pre-check it, then run the api-key or OAuth probe.
 func (h *DashboardHandler) testSingleConnection(ctx context.Context, conn *models.ProviderConnection, data connectionProbeData, raw map[string]any) probeOutcome {
-	client, proxyURL := h.probeHTTPClient(data, raw)
+	client, proxyURL, err := h.probeHTTPClient(data, raw)
+	if err != nil {
+		// strictProxy: the required proxy is unavailable, so the test fails
+		// without any direct connection to the provider.
+		return probeOutcome{message: err.Error()}
+	}
 	if proxyURL != "" {
 		if err := probeProxyURL(ctx, proxyURL); err != nil {
 			return probeOutcome{message: err.Error()}
@@ -329,17 +334,40 @@ func (h *DashboardHandler) testSingleConnection(ctx context.Context, conn *model
 // returns a client bound to it plus the proxy URL when it is a plain HTTP
 // proxy. Relay pools (vercel/cloudflare/deno) are not dialed as proxies, so
 // they fall back to the default client exactly like chat's resolver.
-func (h *DashboardHandler) probeHTTPClient(data connectionProbeData, raw map[string]any) (*http.Client, string) {
+//
+// With strictProxy (top-level, providerSpecificData or on the pool) the probe
+// must go through the proxy: a missing or inactive pool, no URL, an invalid
+// URL, an unknown proxy type or an edge relay (which the probe cannot use)
+// returns an error, and the returned client never falls back to a direct
+// connection (see strictProbeTransport).
+func (h *DashboardHandler) probeHTTPClient(data connectionProbeData, raw map[string]any) (*http.Client, string, error) {
 	poolID := psdStr(data.ProviderSpecificData, "proxyPoolId")
 	if poolID == "" {
 		poolID = psdStr(raw, "proxyPoolId")
 	}
+	strict := probeStrictProxy(data, raw)
 
 	var proxyURLStr, proxyType string
 	if poolID != "" {
-		if pool, err := h.Repo.GetProxyPool(poolID); err == nil && pool != nil && pool.IsActive {
-			proxyURLStr = pool.NextURL()
-			proxyType = pool.Type
+		pool, err := h.Repo.GetProxyPool(poolID)
+		switch {
+		case err != nil || pool == nil:
+			if strict {
+				return nil, "", fmt.Errorf("strict proxy: proxy pool %q is unavailable; connection test not run", poolID)
+			}
+		default:
+			strict = strict || pool.StrictProxy
+			if !pool.IsActive {
+				if strict {
+					return nil, "", fmt.Errorf("strict proxy: proxy pool %q is inactive; connection test not run", poolID)
+				}
+			} else {
+				proxyURLStr = pool.NextURL()
+				proxyType = pool.Type
+				if proxyURLStr == "" && strict {
+					return nil, "", fmt.Errorf("strict proxy: proxy pool %q has no usable URL; connection test not run", poolID)
+				}
+			}
 		}
 	}
 	if proxyURLStr == "" {
@@ -359,20 +387,67 @@ func (h *DashboardHandler) probeHTTPClient(data connectionProbeData, raw map[str
 		}
 	}
 	if proxyURLStr == "" {
-		return nil, ""
+		if strict {
+			return nil, "", fmt.Errorf("strict proxy: no usable proxy is configured; connection test not run")
+		}
+		return nil, "", nil
 	}
 	if proxyType == "vercel" || proxyType == "cloudflare" || proxyType == "deno" {
-		return nil, ""
+		if strict {
+			return nil, "", fmt.Errorf("strict proxy: connection tests cannot go through the %s edge relay; refusing a direct probe", proxyType)
+		}
+		return nil, "", nil
+	}
+	if strict && proxyType != "" && proxyType != "http" {
+		return nil, "", fmt.Errorf("strict proxy: unsupported proxy type %q; connection test not run", proxyType)
 	}
 
 	parsed, err := url.Parse(proxyURLStr)
-	if err != nil {
-		return nil, ""
+	if err != nil || (strict && parsed.Host == "") {
+		if strict {
+			return nil, "", fmt.Errorf("strict proxy: proxy URL is invalid; connection test not run")
+		}
+		return nil, "", nil
 	}
-	return &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(parsed)},
-		Timeout:   connectionProbeTimeout,
-	}, proxyURLStr
+	transport := &http.Transport{Proxy: http.ProxyURL(parsed)}
+	client := &http.Client{Transport: transport, Timeout: connectionProbeTimeout}
+	if strict {
+		client.Transport = strictProbeTransport{base: transport}
+	}
+	return client, proxyURLStr, nil
+}
+
+// probeStrictProxy reports whether the connection blob itself requires a
+// proxy (top-level strictProxy or providerSpecificData.strictProxy).
+func probeStrictProxy(data connectionProbeData, raw map[string]any) bool {
+	if sp, ok := raw["strictProxy"].(bool); ok && sp {
+		return true
+	}
+	if sp, ok := data.ProviderSpecificData["strictProxy"].(bool); ok && sp {
+		return true
+	}
+	return false
+}
+
+// strictProbeTransport marks a probe client bound to a mandatory proxy. The
+// probe helpers (connectionProbeDo, validateProbeDo) never retry such a
+// request with the direct client when the proxy fails.
+type strictProbeTransport struct {
+	base http.RoundTripper
+}
+
+func (t strictProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(req)
+}
+
+// isStrictProbeClient reports whether client must never fall back to a
+// direct connection.
+func isStrictProbeClient(client *http.Client) bool {
+	if client == nil {
+		return false
+	}
+	_, ok := client.Transport.(strictProbeTransport)
+	return ok
 }
 
 // probeProxyURL pre-checks a proxy before probing through it (upstream runs
