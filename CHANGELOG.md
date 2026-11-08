@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fusion: un panel deja de usar la credencial sintética `DefaultAPIKey`/`NoAuth` cuando hay una cuenta configurada. Resuelve la cuenta con `comboConnection` (la misma que el fallback) y, ante 401/403/429, persiste el cooldown de esa cuenta y modelo. Los ids `default` y `noauth` no se bloquean. La cuarentena del trust manager en memoria no entra en este port: en `main` el data plane no registra resultados ahí. Port del delta de #105 y del test de #106.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
