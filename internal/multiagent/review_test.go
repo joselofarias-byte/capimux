@@ -115,7 +115,7 @@ func TestPolicyPreservesAllowlistAndDisabledState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(p.Models) != 2 || p.Models[0] != "provider/a" || p.Models[1] != "provider/b" ||
-		p.ExternalEnabled || p.MaxModels != 8 || p.MaxOutputTokens != 4096 {
+		p.ExternalEnabled || p.MaxModels != 10 || p.MaxOutputTokens != 4096 {
 		t.Fatalf("policy: %+v", p)
 	}
 }
