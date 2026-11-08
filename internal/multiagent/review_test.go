@@ -129,3 +129,82 @@ func TestTimeoutReportsTimeout(t *testing.T) {
 		t.Fatalf("result: %+v", results)
 	}
 }
+
+func TestRunDistinguishesCancelFromTimeout(t *testing.T) {
+	tests := []struct {
+		name         string
+		timeout      time.Duration
+		parent       string
+		want         string
+		forbidInvoke bool
+		iterations   int
+	}{
+		{
+			name:       "nanosecond budget already expired",
+			timeout:    time.Nanosecond,
+			want:       "timed out",
+			iterations: 200,
+		},
+		{
+			name:       "microsecond budget races the timeout",
+			timeout:    time.Microsecond,
+			want:       "timed out",
+			iterations: 200,
+		},
+		{
+			name:         "cancelled parent is not a timeout",
+			timeout:      time.Second,
+			parent:       "cancel",
+			want:         "cancelled",
+			forbidInvoke: true,
+			iterations:   50,
+		},
+		{
+			name:         "cancelled parent wins over an expired budget",
+			timeout:      time.Nanosecond,
+			parent:       "cancel",
+			want:         "cancelled",
+			forbidInvoke: true,
+			iterations:   50,
+		},
+		{
+			name:       "parent deadline already exceeded",
+			timeout:    time.Second,
+			parent:     "deadline",
+			want:       "timed out",
+			iterations: 50,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			switch tt.parent {
+			case "cancel":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "deadline":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Nanosecond)
+				defer cancel()
+				for ctx.Err() == nil {
+					time.Sleep(time.Millisecond)
+				}
+			}
+			var calls atomic.Int32
+			for range tt.iterations {
+				results := Run(ctx, "task", []string{"slow"}, 1, tt.timeout, func(ctx context.Context, _, _ string) (string, error) {
+					calls.Add(1)
+					<-ctx.Done()
+					return "", ctx.Err()
+				})
+				if results[0].Error != tt.want || results[0].Model != "slow" {
+					t.Fatalf("result: %+v", results[0])
+				}
+			}
+			if tt.forbidInvoke && calls.Load() != 0 {
+				t.Fatalf("cancelled work invoked %d providers", calls.Load())
+			}
+		})
+	}
+}

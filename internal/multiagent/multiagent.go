@@ -58,13 +58,15 @@ func Run(ctx context.Context, prompt string, models []string, concurrency int, t
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				results[i].Error = "cancelled"
+				results[i].Error = resultError(ctx, ctx.Err())
 				return
 			}
 			taskCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			if taskCtx.Err() != nil {
-				results[i].Error = "cancelled"
+			// A deadline that already elapsed is a timeout, including when the
+			// budget is gone before invoke. Cancellation stays "cancelled".
+			if err := taskCtx.Err(); err != nil {
+				results[i].Error = resultError(taskCtx, err)
 				return
 			}
 			start := time.Now()
