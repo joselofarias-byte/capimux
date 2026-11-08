@@ -6,10 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+const maxModels = 10
+
 type Request struct {
+	Task          string   `json:"task,omitempty"`
+	Strategy      string   `json:"strategy,omitempty"`
 	Prompt        string   `json:"prompt"`
 	Models        []string `json:"models"`
 	Concurrency   int      `json:"concurrency"`
@@ -37,7 +42,7 @@ var batchSlots = make(chan struct{}, 2)
 
 // Run preserves selection order and cancels queued work before invoking providers.
 func Run(ctx context.Context, prompt string, models []string, concurrency int, timeout time.Duration, invoke Invoker) []Result {
-	concurrency = max(1, min(concurrency, 8))
+	concurrency = max(1, min(concurrency, maxModels))
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -94,6 +99,7 @@ func resultError(ctx context.Context, err error) string {
 
 // Handler must be mounted behind admin session or local CLI authentication.
 func Handler(invoke Invoker) http.HandlerFunc {
+	var sequence atomic.Uint64
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, err := decodeRequest(w, r)
 		if err != nil {
@@ -131,7 +137,7 @@ func Handler(invoke Invoker) http.HandlerFunc {
 			concurrency = 3
 		}
 		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
-		writeResponse(w, Response{Results: Run(r.Context(), req.Prompt, req.Models, concurrency, timeout, invoke)})
+		writeResponse(w, Response{Results: dispatch(r.Context(), req, concurrency, timeout, invoke, &sequence)})
 	}
 }
 
