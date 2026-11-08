@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -159,20 +160,13 @@ func (h *ChatHandler) makePanelCall(body []byte, entry string) func(context.Cont
 			return &fusionResult{model: entry, err: fmt.Errorf("unresolved model: %s", entry)}
 		}
 
-		var connID string
-		var connData *ConnectionData
-		if cfg, ok := providers.KnownProviders[modelInfo.Provider]; ok && (cfg.NoAuth || cfg.DefaultAPIKey != "") {
-			connData = &ConnectionData{
-				APIKey:      cfg.DefaultAPIKey,
-				ProxyPoolID: h.ResolveProviderProxyPoolID(modelInfo.Provider),
-			}
-		} else {
-			conn, cData, err := h.getBestConnection(modelInfo.Provider, modelInfo.ConnectionID, nil, modelInfo.Model)
-			if err != nil {
-				return &fusionResult{model: entry, err: err}
-			}
-			connID = conn.ID
-			connData = cData
+		// Same account contract as combo fallback: a configured account wins over
+		// the provider's built-in default key, so base URL, proxy, and cooldown
+		// stay attached to that account. The synthetic default is only used when
+		// no configured account exists at all.
+		connID, connData, _, err := h.comboConnection(modelInfo, nil)
+		if err != nil {
+			return &fusionResult{model: entry, err: err}
 		}
 
 		var upstreamBody map[string]any
@@ -192,11 +186,27 @@ func (h *ChatHandler) makePanelCall(body []byte, entry string) func(context.Cont
 			IsStream: false, TranslateResponse: false, Endpoint: "/v1/chat/completions",
 		})
 		if fwdErr != nil {
+			h.lockConfiguredFusionAccount(connID, modelInfo.Provider, modelInfo.Model, fwdErr)
 			return &fusionResult{model: entry, err: fwdErr}
 		}
 
 		return &fusionResult{model: entry, ok: true, body: rec.body.Bytes()}
 	}
+}
+
+// lockConfiguredFusionAccount persists the combo cooldown for a real account
+// after a retryable panel failure. Synthetic default and noauth ids are not
+// database rows, so they are never written as locks.
+func (h *ChatHandler) lockConfiguredFusionAccount(connID, provider, model string, fwdErr error) {
+	if connID == "" || connID == "default" || connID == "noauth" || fwdErr == nil {
+		return
+	}
+	var ue *upstreamError
+	if !errors.As(fwdErr, &ue) || !providers.RetryableStatusCodes[ue.StatusCode] {
+		return
+	}
+	excluded := []string{}
+	h.comboLockRetryable(&excluded, connID, provider, model, ue)
 }
 
 // responseBuffer is a minimal http.ResponseWriter that captures output in memory.
