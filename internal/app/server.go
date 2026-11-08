@@ -54,8 +54,12 @@ func ProvideServer(p ServerParams) *http.Server {
 		addr = fmt.Sprintf(":%d", p.Config.Port)
 	}
 	server := &http.Server{
-		Addr:    addr,
-		Handler: p.Handler,
+		Addr:              addr,
+		Handler:           p.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		// WriteTimeout must remain zero for long-lived SSE and WebSocket responses.
 	}
 
 	p.Lifecycle.Append(fx.Hook{
