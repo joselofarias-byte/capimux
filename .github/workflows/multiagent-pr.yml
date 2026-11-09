@@ -1,0 +1,52 @@
+name: Capimux Multiagent PR Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'internal/multiagent/**'
+      - 'internal/handlers/router.go'
+      - 'internal/middleware/dashboard_auth.go'
+      - 'internal/integration/multiagent_test.go'
+      - 'web/src/api/**'
+      - 'web/src/components/MultiagentView.svelte'
+      - 'web/src/components/Sidebar.svelte'
+      - 'web/src/App.svelte'
+      - 'web/src/lib/router.ts'
+      - 'web/src/lib/multiagentProfiles*'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/multiagent-pr.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: multiagent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  multiagent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Review Go formatting
+        run: |
+          unformatted=$(gofmt -l internal/multiagent/*.go internal/integration/multiagent_test.go)
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            echo "::error::Ejecutá gofmt sobre los archivos indicados."
+            exit 1
+          fi
+      # This package does not embed web assets. CI covers the SPA, full suite,
+      # server build and integration tests; only the focused race check runs here.
+      - name: Test multiagent with race detector
+        run: go test -race -count=1 -timeout 10m ./internal/multiagent/ -v

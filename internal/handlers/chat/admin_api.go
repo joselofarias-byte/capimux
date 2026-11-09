@@ -2,6 +2,8 @@ package chat
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"9router/proxy/internal/controlplane/registry"
 	"9router/proxy/internal/controlplane/routing"
@@ -34,6 +36,17 @@ func (h *ChatHandler) HandleAdminExplainRoute(w http.ResponseWriter, r *http.Req
 	policy := routing.PolicyBalanced
 	if policyParam != "" {
 		policy = routing.Policy(policyParam)
+		// With CAPIMUX_EXPLAIN_ROUTE_STRICT_POLICY=1 (audit phase 1, #103, off
+		// by default) reject invented policies instead of explaining a route
+		// no request can take.
+		switch policy {
+		case routing.PolicyBalanced, routing.PolicyFreeOnly, routing.PolicyFreeFirst, routing.PolicyTrusted:
+		default:
+			if explainRouteStrictPolicy() {
+				handlerutil.WriteJSONError(w, http.StatusBadRequest, "Unsupported 'policy' parameter")
+				return
+			}
+		}
 	}
 
 	// For explanation, we just instantiate the Engine directly (in production, passed down)
@@ -48,4 +61,15 @@ func (h *ChatHandler) HandleAdminExplainRoute(w http.ResponseWriter, r *http.Req
 		"policy":         policy,
 		"candidates":     candidates,
 	})
+}
+
+// ExplainRouteStrictPolicyEnvVar turns on policy validation in explain-route.
+const ExplainRouteStrictPolicyEnvVar = "CAPIMUX_EXPLAIN_ROUTE_STRICT_POLICY"
+
+func explainRouteStrictPolicy() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(ExplainRouteStrictPolicyEnvVar))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
