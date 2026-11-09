@@ -79,7 +79,7 @@ func HostInvoker(handler http.HandlerFunc) Invoker {
 			return "", err
 		}
 		if rec.status != http.StatusOK {
-			return "", errors.New("upstream failed")
+			return "", &upstreamStatusError{status: rec.status}
 		}
 		var response struct {
 			Choices []struct {

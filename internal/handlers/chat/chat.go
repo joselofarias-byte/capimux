@@ -49,6 +49,12 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Opt-in DeepSeek profile (off unless CAPIMUX_DEEPSEEK_PROFILE is set):
+	// only its own virtual model id is intercepted.
+	if h.serveDeepSeekProfile(w, r, body, reqBody.Model) {
+		return
+	}
+
 	modelInfo, err := h.resolveModel(reqBody.Model)
 	if err != nil {
 		WriteResolveError(w, err)
@@ -256,7 +262,7 @@ func (h *ChatHandler) handleMessagesSingleModel(ctx context.Context, w http.Resp
 		return
 	}
 
-	result := h.handleAccountFallback(ctx, cw, modelInfo.Provider, modelInfo.Model, modelInfo.ConnectionID, finalBody, isStream, translateResponse, "/v1/v1/messages")
+	result := h.handleAccountFallback(ctx, cw, modelInfo.Provider, modelInfo.Model, modelInfo.ConnectionID, finalBody, isStream, translateResponse, "/v1/messages")
 	if result != nil {
 		if cw.IsCommitted() {
 			log.Error("chat", "upstream error after headers committed", "error", result)
@@ -445,10 +451,18 @@ func (h *ChatHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range result.Models {
 		seen[strings.ToLower(m.ID)] = true
 	}
-	for _, id := range []string{"free", "free-best", "fast-free", "reasoning-free", "coding-best-free", "coding-auto", "long-context-free"} {
-		if !seen[id] {
-			result.Models = append(result.Models, ModelInfoObject{ID: id, Object: "model", OwnedBy: "fabric"})
+	for _, id := range virtualFreeModelIDs() {
+		if seen[id] {
+			continue
 		}
+		info, err := h.resolveModel(id)
+		if err != nil || info == nil || !info.VirtualFree || len(info.ComboModels) == 0 {
+			continue
+		}
+		result.Models = append(result.Models, ModelInfoObject{ID: id, Object: "model", OwnedBy: "fabric"})
+	}
+	if p := h.deepseek; p != nil && p.cfgErr == nil && !seen[strings.ToLower(p.modelID)] {
+		result.Models = append(result.Models, ModelInfoObject{ID: p.modelID, Object: "model", OwnedBy: "deepseek-profile"})
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{
 		"object":      "list",

@@ -90,7 +90,7 @@ func TestHTTPRejectsTooManyModels(t *testing.T) {
 		return "", nil
 	})
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/api/multiagent/run", strings.NewReader(`{"prompt":"x","models":["1","2","3","4","5","6","7","8","9"],"allow_external":true}`))
+	r := httptest.NewRequest("POST", "/api/multiagent/run", strings.NewReader(`{"prompt":"x","models":["1","2","3","4","5","6","7","8","9","10","11"],"allow_external":true}`))
 	h(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status %d", w.Code)

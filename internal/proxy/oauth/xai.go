@@ -42,9 +42,12 @@ func refreshXAI(ctx context.Context, p *Params) (*TokenResult, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil {
 		return nil, fmt.Errorf("xAI read response: %w", err)
+	}
+	if len(body) > 1<<20 {
+		return nil, fmt.Errorf("OAuth response exceeds 1 MiB")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("xAI %w", &providers.OAuthRefreshError{Status: resp.StatusCode, Body: truncateBody(body)})

@@ -60,8 +60,11 @@ func (a *UnoRouterAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 		return nil, fmt.Errorf("read unorouter body: %w", err)
 	}
 
+	// A pointer tells a missing or null "data" key (a broken or changed
+	// response: error, so the previous classification stays) from an explicit
+	// empty list (authoritative).
 	var payload struct {
-		Data []struct {
+		Data *[]struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
@@ -69,11 +72,24 @@ func (a *UnoRouterAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("decode unorouter json: %w", err)
 	}
+	if payload.Data == nil {
+		return nil, fmt.Errorf("unorouter response has no \"data\" list (%d bytes); keeping the previous classification", len(body))
+	}
+	data := *payload.Data
+	withID := 0
+	for _, m := range data {
+		if m.ID != "" {
+			withID++
+		}
+	}
+	if len(data) > 0 && withID == 0 {
+		return nil, fmt.Errorf("unorouter lists %d models without ids; keeping the previous classification", len(data))
+	}
 
 	var candidates []Candidate
 	now := time.Now().UTC()
 
-	for _, m := range payload.Data {
+	for _, m := range data {
 		if m.ID == "" {
 			continue
 		}

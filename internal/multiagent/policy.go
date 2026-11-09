@@ -16,7 +16,9 @@ type Policy struct {
 }
 
 func currentPolicy() Policy {
-	p := Policy{Models: []string{}, ExternalEnabled: os.Getenv("CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL") == "1", MaxModels: 8, MaxOutputTokens: 4096}
+	// Env allowlist advertises main's server cap (maxModels). The Android
+	// private file keeps its own cap inside filePolicy.
+	p := Policy{Models: []string{}, ExternalEnabled: os.Getenv("CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL") == "1", MaxModels: maxModels, MaxOutputTokens: 4096}
 	if path := os.Getenv("CAPIMUX_MULTIAGENT_POLICY_FILE"); path != "" {
 		return filePolicy(path)
 	}
