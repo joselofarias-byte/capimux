@@ -113,7 +113,9 @@ func downloadGoogleBackup(ctx context.Context, accessToken, fileID string) ([]by
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download backup: status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	// Same ceiling as database import. Reject anything larger instead of
+	// decrypting a truncated ciphertext.
+	data, err := readLimited(resp.Body, 64<<20)
 	if err != nil {
 		return nil, err
 	}

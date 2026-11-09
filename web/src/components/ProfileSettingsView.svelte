@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { BACKUP_SECTIONS, buildBackupExportURL } from '../lib/backupSections'
   import { onMount } from 'svelte'
   import {
     AlertCircle,
@@ -264,6 +265,12 @@
     dbAuthOpen = true
   }
 
+  let backupSections = $state<string[]>([])
+
+  function toggleBackupSection(id: string, on: boolean) {
+    backupSections = on ? [...backupSections.filter((s) => s !== id), id] : backupSections.filter((s) => s !== id)
+  }
+
   function handleDownloadBackup() {
     openBackupAuth('download')
   }
@@ -305,11 +312,12 @@
 
   function backupFileName() {
     const stamp = new Date().toISOString().replace(/[.:]/g, '-')
-    return `9router-backup-${stamp}.9rbak`
+    const kind = backupSections.length ? 'backup-parcial' : 'backup'
+    return `9router-${kind}-${stamp}.9rbak`
   }
 
   async function fetchEncryptedBackup(password: string, passphrase: string): Promise<{ blob: Blob; name: string }> {
-    const res = await fetch('/api/settings/database', {
+    const res = await fetch(buildBackupExportURL(backupSections), {
       headers: {
         ...getAuthHeaders(),
         'x-9r-password': password,
@@ -525,6 +533,26 @@
         <p class="text-[11px] text-text-muted leading-relaxed">
           Backups are encrypted before leaving 9router-go. No Google OAuth setup is required for manual Drive backups on Android.
         </p>
+
+        <details class="rounded-lg border border-border bg-surface-1 px-3 py-2 text-xs">
+          <summary class="cursor-pointer font-semibold text-text-main">Exportación parcial (opcional)</summary>
+          <p class="pt-1 text-[11px] text-text-subtle">
+            Elegí qué secciones incluir. Sin selección se descarga el respaldo completo. Al importar un respaldo parcial
+            solo se reemplazan sus secciones; el resto queda como está.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 pt-2">
+            {#each BACKUP_SECTIONS as section (section.id)}
+              <label class="flex items-center gap-2 text-text-main">
+                <input
+                  type="checkbox"
+                  checked={backupSections.includes(section.id)}
+                  onchange={(e) => toggleBackupSection(section.id, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                <span>{section.label}</span>
+              </label>
+            {/each}
+          </div>
+        </details>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <button

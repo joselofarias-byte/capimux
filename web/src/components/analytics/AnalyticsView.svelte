@@ -25,6 +25,8 @@
 
   let { connections = [], providerNodes = [] }: Props = $props()
 
+  let accountNames = $derived(Object.fromEntries(connections.map((connection) => [connection.id, connection.name || connection.id])))
+
   let activeTab = $state<MainTab>('overview')
   let period = $state<Period>('today')
   let isFetching = $state(false)
@@ -464,6 +466,7 @@
     <UsageBreakdownTable {stats} />
   {:else}
     <RequestDetailsTab
+      {accountNames}
       {details}
       {detailsTotal}
       {detailsPage}

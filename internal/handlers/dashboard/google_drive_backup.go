@@ -19,11 +19,12 @@ import (
 
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/proxy"
 )
 
 const (
-	googleDriveBackupScope      = "https://www.googleapis.com/auth/drive.file"
-	googleDriveBackupFolderName = "9router Backups"
+	googleDriveBackupScope               = "https://www.googleapis.com/auth/drive.file"
+	googleDriveBackupFolderName          = "9router Backups"
 	googleDriveBackupKeep                = 5
 	googleDriveBackupKind                = "9router-encrypted-backup"
 	googleDriveBackupRefreshTokenSetting = "googleDriveBackupRefreshToken"
@@ -34,8 +35,14 @@ var (
 	googleDriveBackupTokenURL  = "https://oauth2.googleapis.com/token"
 	googleDriveBackupAPIURL    = "https://www.googleapis.com/drive/v3"
 	googleDriveBackupUploadURL = "https://www.googleapis.com/upload/drive/v3"
-	googleDriveBackupClient    = &http.Client{Timeout: 30 * time.Second}
-	googleDriveBackupStates    sync.Map
+	// Same outbound client as the other dashboard/OAuth calls: honor the
+	// environment proxy, and fall back to a direct connection only when that
+	// proxy refuses the tunnel. A bare client has no such fallback.
+	googleDriveBackupClient = &http.Client{
+		Transport: proxy.NewFallbackTransport(http.DefaultTransport),
+		Timeout:   30 * time.Second,
+	}
+	googleDriveBackupStates sync.Map
 )
 
 type googleBackupState struct {
@@ -134,7 +141,6 @@ func consumeGoogleBackupState(state, redirectURI string) bool {
 	expected, ok := value.(googleBackupState)
 	return ok && time.Now().Before(expected.ExpiresAt) && expected.RedirectURI == strings.TrimSpace(redirectURI)
 }
-
 
 // HandleGoogleBackupStatus reports whether direct Google Drive backup can be
 // used on this runtime. It never returns OAuth client credentials.
@@ -363,8 +369,11 @@ func exchangeGoogleBackupCodeTokens(ctx context.Context, code, redirectURI strin
 		return nil, errors.New("Google token exchange failed")
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || resp.StatusCode != http.StatusOK {
+	data, err := readLimited(resp.Body, 1<<20)
+	if err != nil {
+		return nil, errors.New("Google token exchange failed")
+	}
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("Google token exchange returned status %d", resp.StatusCode)
 	}
 	var token googleDriveTokenResponse
@@ -397,8 +406,11 @@ func refreshGoogleBackupAccessToken(ctx context.Context, refreshToken string) (s
 		return "", errors.New("Google token refresh failed")
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || resp.StatusCode != http.StatusOK {
+	data, err := readLimited(resp.Body, 1<<20)
+	if err != nil {
+		return "", errors.New("Google token refresh failed")
+	}
+	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("Google token refresh returned status %d", resp.StatusCode)
 	}
 	var token googleDriveTokenResponse
@@ -598,10 +610,10 @@ func rotateGoogleBackups(ctx context.Context, accessToken, folderID string, keep
 		return 0, nil
 	}
 	q := url.Values{
-		"spaces":  {"drive"},
-		"q":       {"'" + folderID + "' in parents and trashed = false"},
-		"orderBy": {"createdTime desc"},
-		"fields":  {"files(id,name,createdTime,size,appProperties)"},
+		"spaces":   {"drive"},
+		"q":        {"'" + folderID + "' in parents and trashed = false"},
+		"orderBy":  {"createdTime desc"},
+		"fields":   {"files(id,name,createdTime,size,appProperties)"},
 		"pageSize": {"100"},
 	}
 	req, err := googleDriveRequest(ctx, http.MethodGet, googleDriveBackupAPIURL+"/files?"+q.Encode(), accessToken, nil, "")
@@ -646,7 +658,7 @@ func rotateGoogleBackups(ctx context.Context, accessToken, folderID string, keep
 			}
 			continue
 		}
-		io.Copy(io.Discard, io.LimitReader(delResp.Body, 1<<20))
+		_, _ = io.Copy(io.Discard, io.LimitReader(delResp.Body, 1<<20))
 		delResp.Body.Close()
 		if delResp.StatusCode != http.StatusNoContent {
 			if firstErr == nil {
@@ -659,8 +671,19 @@ func rotateGoogleBackups(ctx context.Context, accessToken, folderID string, keep
 	return deleted, firstErr
 }
 
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("response exceeds size limit")
+	}
+	return data, nil
+}
+
 func decodeGoogleDriveJSON(r io.Reader, limit int64, dst any) error {
-	data, err := io.ReadAll(io.LimitReader(r, limit))
+	data, err := readLimited(r, limit)
 	if err != nil {
 		return err
 	}

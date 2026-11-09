@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/db"
 )
 
 // ProviderNodeResponse is the JSON representation of a provider node with unpacked data fields.
@@ -231,6 +232,16 @@ func (h *DashboardHandler) HandleUpdateProviderNode(w http.ResponseWriter, r *ht
 		baseURL = strings.TrimSuffix(baseURL, "/")
 		baseURL = strings.TrimSuffix(baseURL, "/embeddings")
 	}
+	if h.requiresAdminForPosture(r) {
+		previousBaseURL := ""
+		if nodeData != nil {
+			previousBaseURL = nodeData.BaseURL
+		}
+		if baseURL != previousBaseURL {
+			writePlainError(w, http.StatusForbidden, adminRequiredMessage("cambiar la URL base de un nodo de proveedor"))
+			return
+		}
+	}
 	apiType := ""
 	if nodeData != nil {
 		apiType = nodeData.APIType
@@ -310,7 +321,14 @@ func (h *DashboardHandler) HandleDeleteProviderNode(w http.ResponseWriter, r *ht
 	}
 
 	if err := h.Repo.DeleteProviderNode(id); err != nil {
-		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, db.ErrProviderNodeNotFound):
+			handlerutil.WriteJSONError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, db.ErrProviderNodeNotDeletable):
+			handlerutil.WriteJSONError(w, http.StatusBadRequest, err.Error())
+		default:
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})

@@ -73,9 +73,19 @@ func retryableCooldownSec(statusCode int, base time.Duration, ue *upstreamError)
 // repeating the pass, what to tell the client, and whether a 429 was among the
 // failures — and keeping them together stops the two endpoints from drifting
 // apart on a contract only one of them would enforce.
+// retriedLock is a cooldown this request wrote. The bounded second pass has
+// to release it: the stored duration is rounded up to a whole second, so the
+// account can still look locked after the raw Retry-After wait has elapsed.
+type retriedLock struct {
+	connID   string
+	provider string
+	model    string
+}
+
 type passRetry struct {
 	earliest    time.Duration
 	rateLimited bool
+	locked      []retriedLock
 }
 
 // note folds an upstream failure into the pass-wide wait.
@@ -86,6 +96,15 @@ func (p *passRetry) note(ue *upstreamError) {
 	if wait, ok := retryAfterWait(ue); ok && (p.earliest == 0 || wait < p.earliest) {
 		p.earliest = wait
 	}
+}
+
+// noteLock remembers a connection this pass parked, including the model the
+// selector will consult on the next pass.
+func (p *passRetry) noteLock(connID, provider, model string) {
+	if p == nil || connID == "" {
+		return
+	}
+	p.locked = append(p.locked, retriedLock{connID: connID, provider: provider, model: model})
 }
 
 // reset starts a fresh pass: the previous one's exclusions and waits do not
@@ -212,7 +231,7 @@ func parseRetryAfterHeader(v string) (time.Duration, bool) {
 		if secs <= 0 {
 			return 0, false
 		}
-		return time.Duration(secs) * time.Second, true
+		return secondsWait(secs), true
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		if d := time.Until(t); d > 0 {
@@ -248,9 +267,23 @@ func parseDurationString(v string) (time.Duration, bool) {
 		return d, d > 0
 	}
 	if secs, err := strconv.Atoi(v); err == nil {
-		return time.Duration(secs) * time.Second, secs > 0
+		return secondsWait(secs), secs > 0
 	}
 	return 0, false
+}
+
+// secondsWait converts an upstream's delta-seconds without letting a huge
+// value overflow time.Duration into a negative wait (which every caller then
+// read as "no wait" and re-picked the exhausted account). Anything past
+// maxResetCooldown is held there, as every cooldown already is.
+func secondsWait(secs int) time.Duration {
+	if secs <= 0 {
+		return 0
+	}
+	if secs > int(maxResetCooldown/time.Second) {
+		return maxResetCooldown
+	}
+	return time.Duration(secs) * time.Second
 }
 
 func ceilSeconds(d time.Duration) int {

@@ -15,6 +15,21 @@ import (
 	"9router/proxy/internal/auth"
 )
 
+func TestReadLimitedRejectsOversizedBodyWithoutEchoingIt(t *testing.T) {
+	payload := strings.Repeat("a", (1<<20)+8)
+	_, err := readLimited(strings.NewReader(payload), 1<<20)
+	if err == nil {
+		t.Fatal("expected size-limit error")
+	}
+	if strings.Contains(err.Error(), "aaaa") {
+		t.Fatal("size-limit error must not echo the body")
+	}
+	got, err := readLimited(strings.NewReader(`{"ok":true}`), 1<<20)
+	if err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("small body: %q err=%v", got, err)
+	}
+}
+
 func clearGoogleBackupStatesForTest() {
 	googleDriveBackupStates.Range(func(key, value any) bool {
 		googleDriveBackupStates.Delete(key)
@@ -296,7 +311,6 @@ func TestValidateGoogleBackupRedirectURIRejectsPlainHTTPRemoteHost(t *testing.T)
 		t.Fatalf("https redirect rejected: %v", err)
 	}
 }
-
 
 func TestHandleGoogleBackupStatusDoesNotExposeCredentials(t *testing.T) {
 	repo, cleanup := setupSettingsTestDB(t)
