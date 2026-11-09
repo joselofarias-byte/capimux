@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 
+	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -27,7 +27,23 @@ func (h *DashboardHandler) HandleGetCombos(w http.ResponseWriter, r *http.Reques
 	if combos == nil {
 		combos = []*models.Combo{}
 	}
-	handlerutil.WriteJSON(w, http.StatusOK, combos)
+	// Each combo also carries read-only review fields: generated,
+	// needsReview, reviewReason and unavailableModels (additive).
+	reviews, err := h.comboReviews(combos)
+	if err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(combos))
+	for _, c := range combos {
+		m, err := comboWithReview(c, reviews[c.ID])
+		if err != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, m)
+	}
+	handlerutil.WriteJSON(w, http.StatusOK, out)
 }
 
 // HandleCreateCombo handles POST /api/combos.
@@ -61,6 +77,10 @@ func (h *DashboardHandler) HandleCreateCombo(w http.ResponseWriter, r *http.Requ
 	}
 	if req.Strategy == "" {
 		req.Strategy = "fallback"
+	}
+	if !db.IsValidComboStrategy(req.Strategy) {
+		writeInvalidComboStrategy(w, req.Strategy)
+		return
 	}
 
 	modelsJSON := "[]"
@@ -145,9 +165,12 @@ func (h *DashboardHandler) HandleUpdateCombo(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
+	// An empty strategy leaves the saved one alone (UpdateCombo skips it), so
+	// editing the name, models or kind never rewrites the combo's strategy.
 	strategy := req.Strategy
-	if strategy == "" {
-		strategy = existing.Strategy
+	if strategy != "" && !db.IsValidComboStrategy(strategy) {
+		writeInvalidComboStrategy(w, strategy)
+		return
 	}
 	// Renaming a combo moves the bare name it answers to, so a rename gets the
 	// same check as a create. Leaving the name alone is unaffected: the guard
@@ -186,9 +209,19 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if len(models) == 0 {
-		handlerutil.WriteJSONError(w, http.StatusConflict,
-			"no free-tier models found among providers with connections")
+	if len(models) < minFamilyMembers {
+		// A fallback chain needs two models. Prune the generated combo if it
+		// is still untouched; a combo the user edited stays and is flagged.
+		pruned, perr := h.pruneGeneratedCombos(r.Context())
+		if perr != nil {
+			handlerutil.WriteJSONError(w, http.StatusInternalServerError, perr.Error())
+			return
+		}
+		handlerutil.WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":  fmt.Sprintf("Se necesitan al menos dos modelos gratuitos disponibles (proveedor con conexión activa y modelo habilitado) para el combo Auto Free Tier; hay %d.", len(models)),
+			"count":  len(models),
+			"pruned": pruned,
+		})
 		return
 	}
 
@@ -209,7 +242,16 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 			handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), "fallback"); err != nil {
+	} else if err := h.Repo.UpdateCombo(AutoFreeComboID, name, autoFreeComboKind, string(modelsJSON), ""); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := h.markGenerated(AutoFreeComboID, autoFreeComboKind, name, models, "fallback"); err != nil {
+		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pruned, err := h.pruneGeneratedCombos(r.Context())
+	if err != nil {
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -218,12 +260,15 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 		"status": "ok",
 		"id":     AutoFreeComboID,
 		"models": models,
+		"pruned": pruned,
 	})
 }
 
 // freeTierComboModels returns "alias/model" ids for every free-tier registry
-// model of providers with at least one connection, ordered by provider alias
-// then model id so regenerating yields a stable, diffable list.
+// model of providers with at least one active connection, skipping models the
+// user disabled on the provider page, grouped by model family and ordered
+// newest version first inside each family (owner decision 4, cycle 9), with
+// the key as tie-break so regenerating yields a stable, diffable list.
 //
 // The free-tier marker is a naming convention, not a service kind: ":free" /
 // "/free" / "-free" also lands on embedding, image, tts and stt models
@@ -232,24 +277,38 @@ func (h *DashboardHandler) HandleAutoFreeCombo(w http.ResponseWriter, r *http.Re
 // never enters the fallback chain — same gate usableModelFamilies applies to
 // the auto-family combos.
 func (h *DashboardHandler) freeTierComboModels(ctx context.Context) ([]string, error) {
-	active, err := h.Repo.GetConnectedProviders(ctx)
+	conns, err := h.Repo.GetProviderConnections("", true)
 	if err != nil {
-		return nil, fmt.Errorf("freeTierComboModels: list providers: %w", err)
+		return nil, fmt.Errorf("freeTierComboModels: list connections: %w", err)
+	}
+	active := make(map[string]struct{}, len(conns))
+	for _, c := range conns {
+		if c.Provider != "" {
+			active[c.Provider] = struct{}{}
+		}
+	}
+	disabled, err := h.disabledModelsByAlias()
+	if err != nil {
+		return nil, fmt.Errorf("freeTierComboModels: disabled models: %w", err)
 	}
 
 	var out []string
 	for providerID := range active {
+		alias := providers.GetProviderAlias(providerID)
 		for _, modelID := range providers.GetProviderModels(providerID) {
+			if _, off := disabled[alias][modelID]; off {
+				continue
+			}
 			if !providers.IsFreeTierModel(modelID) {
 				continue
 			}
 			if kind := providers.GetProviderModelKind(providerID, modelID); kind != "" && kind != "llm" {
 				continue
 			}
-			out = append(out, providers.GetProviderAlias(providerID)+"/"+modelID)
+			out = append(out, alias+"/"+modelID)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sortFreeTierModels(out)
 	return out, nil
 }
 
@@ -296,6 +355,14 @@ func (h *DashboardHandler) HandleDeleteCombo(w http.ResponseWriter, r *http.Requ
 		handlerutil.WriteJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = h.Repo.DeleteKV(generatedCombosScope, id)
 
 	handlerutil.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "id": id})
+}
+
+// writeInvalidComboStrategy rejects a strategy the router does not implement,
+// instead of saving a value that would silently route as fallback.
+func writeInvalidComboStrategy(w http.ResponseWriter, strategy string) {
+	handlerutil.WriteJSONError(w, http.StatusBadRequest, fmt.Sprintf(
+		"estrategia de combo inválida %q: usá una de %s", strategy, strings.Join(db.ValidComboStrategies, ", ")))
 }
