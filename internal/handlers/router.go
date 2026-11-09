@@ -10,7 +10,10 @@ import (
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlers/sso"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/keyquota"
 	"9router/proxy/internal/middleware"
+	"9router/proxy/internal/multiagent"
+	"9router/proxy/internal/promptinject"
 	"9router/proxy/web"
 	json "encoding/json/v2"
 	"github.com/go-chi/chi/v5"
@@ -129,11 +132,10 @@ func SetupRoutes(r interface {
 	r.Get("/api/usage/stream", HandleUsageStream(repo))
 	r.Get("/usage/stats", HandleUsageStats(repo))
 	r.Get("/api/usage/stats", HandleUsageStats(repo))
-	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
 	r.Get("/api/usage/{connectionId}", dashH.HandleGetConnectionUsage)
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
-	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	r.Post("/api/usage/{connectionId}/reset-credits/consume", adminOnly(repo, "consumir créditos de reinicio de una cuenta", dashH.HandleConsumeCodexResetCredit))
 
 	// Debug Tracing Domain (p50/p95 latency per provider+model)
 	r.Get("/debug/traces", HandleDebugTraces)
@@ -146,37 +148,49 @@ func SetupRoutes(r interface {
 func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) {
 	dashH := dashboard.NewDashboardHandler(repo)
 	ssoH := sso.NewHandler(repo)
+	// Prompt injection, combo identities, inspector and captures: admin only.
+	setupPromptInjectionRoutes(r, repo)
+	// Per-key quotas admin API: admin only.
+	setupKeyQuotaRoutes(r, repo)
+	// Health tracker behind the opt-in "health" combo strategy: admin only.
+	setupComboHealthRoutes(r, repo)
 
+	// Multiagent calls share the dashboard authentication guard.
+	r.Get("/api/multiagent/policy", multiagent.PolicyHandler)
+	r.Post("/api/multiagent/run", multiagent.Handler(multiagent.HostInvoker(chatH.HandleChatCompletions)))
 	r.Get("/api/connections", dashH.HandleGetConnections)
 	r.Get("/api/providers", dashH.HandleGetProvidersClient)
 	r.Get("/api/providers/client", dashH.HandleGetProvidersClient)
 	r.Post("/api/connections", dashH.HandleCreateConnection)
 	r.Post("/api/providers/validate", dashH.HandleValidateProvider)
-	r.Put("/api/connections/{id}", dashH.HandleUpdateConnection)
-	r.Put("/api/providers/{id}", dashH.HandleUpdateConnection)
-	r.Delete("/api/connections/{id}", dashH.HandleDeleteConnection)
-	r.Delete("/api/providers/{id}", dashH.HandleDeleteConnection)
-	r.Post("/api/connections/{id}/test", dashH.HandleTestConnection)
-	r.Post("/api/connections/{id}/reorder", dashH.HandleReorderConnection)
-	r.Post("/api/providers/{id}/reorder", dashH.HandleReorderConnection)
-	r.Post("/api/providers/{id}/test", dashH.HandleTestConnection)
+	// Renaming, enabling/disabling, the assigned model and every other field of
+	// a connection are admin-only: a client API key uses the connections, it
+	// does not configure them.
+	r.Put("/api/connections/{id}", adminOnly(repo, "modificar conexiones (nombre, estado, modelo u otra configuración)", dashH.HandleUpdateConnection))
+	r.Put("/api/providers/{id}", adminOnly(repo, "modificar conexiones (nombre, estado, modelo u otra configuración)", dashH.HandleUpdateConnection))
+	r.Delete("/api/connections/{id}", adminOnly(repo, "borrar conexiones", dashH.HandleDeleteConnection))
+	r.Delete("/api/providers/{id}", adminOnly(repo, "borrar conexiones", dashH.HandleDeleteConnection))
+	// The probe writes the result (and refreshed tokens) back to the row.
+	r.Post("/api/connections/{id}/test", adminOnly(repo, "probar conexiones (guarda su estado)", dashH.HandleTestConnection))
+	r.Post("/api/connections/{id}/reorder", adminOnly(repo, "cambiar el orden de rotación", dashH.HandleReorderConnection))
+	r.Post("/api/providers/{id}/reorder", adminOnly(repo, "cambiar el orden de rotación", dashH.HandleReorderConnection))
+	r.Post("/api/providers/{id}/test", adminOnly(repo, "probar conexiones (guarda su estado)", dashH.HandleTestConnection))
 	r.Get("/api/providers/suggested-models", HandleSuggestedModels)
 	// Usage & Quota Endpoints (dashboard quota tracker, usage stats, and topology stream)
 	r.Get("/api/usage/stream", HandleUsageStream(repo))
 	r.Get("/usage/stream", HandleUsageStream(repo))
 	r.Get("/api/usage/stats", HandleUsageStats(repo))
 	r.Get("/usage/stats", HandleUsageStats(repo))
-	r.Get("/api/usage/request-details", HandleRequestDetails(repo))
 	r.Get("/api/usage/providers", dashH.HandleGetUsageProviders)
 	r.Get("/api/usage/{connectionId}", dashH.HandleGetConnectionUsage)
 
 	r.Get("/api/usage/{connectionId}/reset-credits", dashH.HandleListCodexResetCredits)
-	r.Post("/api/usage/{connectionId}/reset-credits/consume", dashH.HandleConsumeCodexResetCredit)
+	r.Post("/api/usage/{connectionId}/reset-credits/consume", adminOnly(repo, "consumir créditos de reinicio de una cuenta", dashH.HandleConsumeCodexResetCredit))
 
 	r.Get("/api/provider-nodes", dashH.HandleGetProviderNodes)
-	r.Post("/api/provider-nodes", dashH.HandleCreateProviderNode)
-	r.Put("/api/provider-nodes/{id}", dashH.HandleUpdateProviderNode)
-	r.Delete("/api/provider-nodes/{id}", dashH.HandleDeleteProviderNode)
+	r.Post("/api/provider-nodes", adminOnly(repo, "crear provider nodes", dashH.HandleCreateProviderNode))
+	r.Put("/api/provider-nodes/{id}", adminOnly(repo, "modificar provider nodes", dashH.HandleUpdateProviderNode))
+	r.Delete("/api/provider-nodes/{id}", adminOnly(repo, "eliminar provider nodes", dashH.HandleDeleteProviderNode))
 	r.Post("/api/provider-nodes/validate", dashH.HandleValidateProviderNode)
 	r.Get("/api/providers/{id}/models", dashH.HandleGetConnectionModels)
 
@@ -188,10 +202,12 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	r.Delete("/api/combos/{id}", dashH.HandleDeleteCombo)
 
 	r.Get("/api/proxy-pools", dashH.HandleGetProxyPools)
-	r.Post("/api/proxy-pools", dashH.HandleCreateProxyPool)
-	r.Put("/api/proxy-pools/{id}", dashH.HandleUpdateProxyPool)
-	r.Delete("/api/proxy-pools/{id}", dashH.HandleDeleteProxyPool)
-	r.Post("/api/proxy-pools/{id}/test", dashH.HandleTestProxyPool)
+	// Proxy pools decide where connection traffic, credentials included, is
+	// sent: same admin-only rule as the connections themselves.
+	r.Post("/api/proxy-pools", adminOnly(repo, "crear proxy pools", dashH.HandleCreateProxyPool))
+	r.Put("/api/proxy-pools/{id}", adminOnly(repo, "modificar proxy pools", dashH.HandleUpdateProxyPool))
+	r.Delete("/api/proxy-pools/{id}", adminOnly(repo, "eliminar proxy pools", dashH.HandleDeleteProxyPool))
+	r.Post("/api/proxy-pools/{id}/test", adminOnly(repo, "probar proxy pools (guarda su estado)", dashH.HandleTestProxyPool))
 
 	r.Get("/api/keys", dashH.HandleGetApiKeys)
 	r.Post("/api/keys", dashH.HandleCreateApiKey)
@@ -273,49 +289,56 @@ func mountOAuthRoutes(r interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
 	Post(pattern string, handlerFn http.HandlerFunc)
 }, oauthH *oauth.OAuthHandler) {
-	r.Post("/api/oauth/{provider}/import", oauthH.HandleOAuthImport)
+	// Routes that store provider credentials go through guardCredentialWrite:
+	// with only a client API key, append-only imports follow
+	// allowClientCredentialImport and account-matching upserts are admin-only.
+	r.Post("/api/oauth/{provider}/import", guardCredentialWrite(oauthH.Repo, credentialAppendOnly, oauthH.HandleOAuthImport))
 	r.Get("/api/oauth/kiro/social-authorize", oauthH.HandleOAuthKiroSocialAuthorize)
-	r.Post("/api/oauth/kiro/social-exchange", oauthH.HandleOAuthKiroSocialExchange)
-	r.Post("/api/oauth/kiro/import", oauthH.HandleKiroImport)
-	r.Post("/api/oauth/kiro/import-cli-proxy", oauthH.HandleKiroImportCliProxy)
+	r.Post("/api/oauth/kiro/social-exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleOAuthKiroSocialExchange))
+	r.Post("/api/oauth/kiro/import", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleKiroImport))
+	r.Post("/api/oauth/kiro/import-cli-proxy", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleKiroImportCliProxy))
 	r.Get("/api/oauth/kiro/auto-import", oauthH.HandleKiroAutoImport)
-	r.Post("/api/oauth/kiro/api-key", oauthH.HandleKiroAPIKey)
-	r.Post("/api/oauth/codex/bulk-import", oauthH.HandleOAuthCodexBulkImport)
-	r.Post("/api/oauth/grok-cli/bulk-import", oauthH.HandleOAuthGrokCliBulkImport)
+	r.Post("/api/oauth/kiro/api-key", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleKiroAPIKey))
+	r.Post("/api/oauth/codex/bulk-import", guardCredentialWrite(oauthH.Repo, credentialAppendOnly, oauthH.HandleOAuthCodexBulkImport))
+	// Preferred Codex login: delegate OAuth to the installed official Codex CLI.
+	// The existing PKCE proxy remains below as a compatibility fallback.
+	r.Post("/api/oauth/codex/cli-login/start", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleCodexCLIStart))
+	r.Get("/api/oauth/codex/cli-login/status", oauthH.HandleCodexCLIStatus)
+	r.Post("/api/oauth/codex/cli-login/cancel", oauthH.HandleCodexCLICancel)
 	r.Post("/api/oauth/freebuff/initiate", oauthH.HandleFreebuffInitiate)
-	r.Post("/api/oauth/freebuff/poll", oauthH.HandleFreebuffPoll)
+	r.Post("/api/oauth/freebuff/poll", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleFreebuffPoll))
 	r.Get("/api/oauth/freebuff/session", oauthH.HandleFreebuffSessionStatus)
-	r.Post("/api/oauth/freebuff/session/switch", oauthH.HandleFreebuffSessionSwitch)
+	r.Post("/api/oauth/freebuff/session/switch", adminOnly(oauthH.Repo, "cambiar la sesión de una conexión Freebuff", oauthH.HandleFreebuffSessionSwitch))
 	r.Get("/api/oauth/antigravity/authorize", oauthH.HandleAntigravityAuthorize)
-	r.Post("/api/oauth/antigravity/exchange", oauthH.HandleAntigravityExchange)
+	r.Post("/api/oauth/antigravity/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleAntigravityExchange))
 	r.Get("/api/oauth/cline/authorize", oauthH.HandleClineAuthorize)
-	r.Post("/api/oauth/cline/exchange", oauthH.HandleClineExchange)
+	r.Post("/api/oauth/cline/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleClineExchange))
 	r.Get("/api/oauth/pkce/authorize", oauthH.HandlePKCEAuthorize)
-	r.Post("/api/oauth/pkce/exchange", oauthH.HandlePKCEExchange)
+	r.Post("/api/oauth/pkce/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandlePKCEExchange))
 	// Codex's OAuth client only accepts its registered loopback redirect URI,
 	// so the callback is served by a dedicated fixed-port listener rather than
 	// the dashboard's /callback page. See internal/handlers/oauth/codex_proxy.go.
-	r.Get("/api/oauth/codex/start-proxy", oauthH.HandleCodexStartProxy)
+	r.Get("/api/oauth/codex/start-proxy", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleCodexStartProxy))
 	r.Get("/api/oauth/codex/poll-status", oauthH.HandleCodexPollStatus)
 	r.Get("/api/oauth/codex/stop-proxy", oauthH.HandleCodexStopProxy)
 	r.Get("/api/oauth/authcode/authorize", oauthH.HandleAuthCodeAuthorize)
-	r.Post("/api/oauth/authcode/exchange", oauthH.HandleAuthCodeExchange)
+	r.Post("/api/oauth/authcode/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleAuthCodeExchange))
 	r.Get("/api/oauth/trae/authorize", oauthH.HandleTraeAuthorize)
-	r.Post("/api/oauth/trae/exchange", oauthH.HandleTraeExchange)
+	r.Post("/api/oauth/trae/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleTraeExchange))
 	r.Get("/api/oauth/windsurf/authorize", oauthH.HandleWindsurfAuthorize)
-	r.Post("/api/oauth/windsurf/exchange", oauthH.HandleWindsurfExchange)
+	r.Post("/api/oauth/windsurf/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleWindsurfExchange))
 	r.Get("/api/oauth/zed/authorize", oauthH.HandleZedAuthorize)
-	r.Post("/api/oauth/zed/exchange", oauthH.HandleZedExchange)
+	r.Post("/api/oauth/zed/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleZedExchange))
 	r.Post("/api/oauth/device/start", oauthH.HandleDeviceStart)
-	r.Post("/api/oauth/device/poll", oauthH.HandleDevicePoll)
-	r.Post("/api/oauth/cursor/import", oauthH.HandleCursorImport)
+	r.Post("/api/oauth/device/poll", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleDevicePoll))
+	r.Post("/api/oauth/cursor/import", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleCursorImport))
 	r.Get("/api/oauth/cursor/auto-import", oauthH.HandleCursorAutoImport)
 	r.Get("/api/oauth/kimchi/authorize", oauthH.HandleKimchiAuthorize)
-	r.Post("/api/oauth/kimchi/exchange", oauthH.HandleKimchiExchange)
-	r.Post("/api/oauth/gitlab/pat", oauthH.HandleGitlabPAT)
-	r.Post("/api/oauth/iflow/cookie", oauthH.HandleIflowCookie)
+	r.Post("/api/oauth/kimchi/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleKimchiExchange))
+	r.Post("/api/oauth/gitlab/pat", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleGitlabPAT))
+	r.Post("/api/oauth/iflow/cookie", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleIflowCookie))
 	r.Get("/api/oauth/xiaomi-mimo/authorize", oauthH.HandleMimoAuthorize)
-	r.Post("/api/oauth/xiaomi-mimo/exchange", oauthH.HandleMimoExchange)
+	r.Post("/api/oauth/xiaomi-mimo/exchange", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleMimoExchange))
 }
 
 // SetupServerRouter mounts public endpoints (/health, /api/hello) and
@@ -400,6 +423,14 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAdminAuth())
 
+		// Grok credential import changes the global provider account pool.
+		// Engine API keys must never authorize administrative credential writes.
+		r.Post("/api/oauth/grok-cli/bulk-import", oauthH.HandleOAuthGrokCliBulkImport)
+
+		// Historical request content requires administrator authentication.
+		r.Get("/api/usage/request-details", HandleRequestDetails(repo))
+		r.Delete("/api/usage/request-details", HandlePurgeRequestDetails(repo))
+
 		// Health reset endpoint — dashboard calls this via headroom proxy
 		r.Post("/admin/health/reset", func(w http.ResponseWriter, r *http.Request) {
 			provider := r.URL.Query().Get("provider")
@@ -413,6 +444,10 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		})
 
 		chatH := chat.NewChatHandler(repo, ts)
+		// Free Best diagnosis and route explanation are operational, not inference.
+		// Admin session or local CLI token only: an engine API key must not read them.
+		r.Get("/api/admin/free-best", chatH.HandleFreeBestDiagnosis)
+		r.Get("/api/admin/explain-route", chatH.HandleAdminExplainRoute)
 		r.Post("/api/version/update", chatH.HandleTriggerUpdate)
 		r.Post("/api/version/auto-update", chatH.HandleToggleAutoUpdate)
 		r.Post("/api/version/shutdown", HandleShutdown)
@@ -421,6 +456,24 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	// API-key protected domain routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireApiKey(repo))
+		// Per-key RPM/TPM/concurrency/token quotas (off by default).
+		r.Use(keyquota.Middleware(repo, func(r *http.Request) string {
+			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
+				return k.ID
+			}
+			return ""
+		}))
+		// Prompt injection and combo public identity (both off by default).
+		// Runs after authentication so the layer of the calling key is known.
+		r.Use(promptinject.Middleware(repo, func(name string) bool {
+			c, err := repo.GetComboByName(name)
+			return err == nil && c != nil
+		}, func(r *http.Request) string {
+			if k := middleware.GetAuthenticatedApiKey(r); k != nil {
+				return k.ID
+			}
+			return ""
+		}))
 		SetupRoutes(r, repo, ts)
 	})
 

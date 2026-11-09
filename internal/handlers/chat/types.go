@@ -25,6 +25,7 @@ type ChatHandler struct {
 	TokenSaver  *shared.TokenSaverConfig
 	stickyMu    sync.Mutex
 	stickyState map[string]*comboStickyState
+	deepseek    *deepseekProfile // opt-in DeepSeek profile; nil = off
 }
 
 // Type aliases for shared types

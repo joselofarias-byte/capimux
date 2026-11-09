@@ -3,8 +3,10 @@ export type ActiveTab =
   | 'endpoint'
   | 'connections'
   | 'combos'
+  | 'multiagent'
   | 'analytics'
   | 'quota'
+  | 'key-quotas'
   | 'token-saver'
   | 'cli-tools'
   | 'media-embedding'
@@ -20,14 +22,18 @@ export type ActiveTab =
   | 'terminal'
   | 'settings'
   | 'keys'
+  | 'prompt-injection'
+  | 'playground'
 
 export const TAB_ROUTES: Record<ActiveTab, string> = {
   login: '/login',
   endpoint: '/dashboard/endpoint',
   connections: '/dashboard/providers',
   combos: '/dashboard/combos',
+  multiagent: '/dashboard/multiagent',
   analytics: '/dashboard/usage',
   quota: '/dashboard/quota',
+  'key-quotas': '/dashboard/key-limits',
   'token-saver': '/dashboard/token-saver',
   'cli-tools': '/dashboard/cli-tools',
   'media-embedding': '/dashboard/media-providers/embedding',
@@ -43,6 +49,8 @@ export const TAB_ROUTES: Record<ActiveTab, string> = {
   terminal: '/dashboard/console-log',
   settings: '/dashboard/profile',
   keys: '/dashboard/cli-tools',
+  'prompt-injection': '/dashboard/prompt-injection',
+  playground: '/dashboard/playground',
 }
 
 const ROUTE_TO_TAB: Record<string, ActiveTab> = {
@@ -65,11 +73,21 @@ const ROUTE_TO_TAB: Record<string, ActiveTab> = {
   '/dashboard/combos': 'combos',
   '/combos': 'combos',
 
+  '/dashboard/multiagent': 'multiagent',
+  '/multiagent': 'multiagent',
+
+  // prompt injection & playground
+  '/dashboard/prompt-injection': 'prompt-injection',
+  '/dashboard/playground': 'playground',
+
   // usage / analytics
   '/dashboard/usage': 'analytics',
   '/dashboard/analytics': 'analytics',
   '/usage': 'analytics',
   '/analytics': 'analytics',
+
+  // per-key quotas
+  '/dashboard/key-limits': 'key-quotas',
 
   // quota tracker
   '/dashboard/quota': 'quota',
@@ -165,6 +183,7 @@ export function pathToTab(pathname: string): ActiveTab {
   }
   if (normalized.includes('quota')) return 'quota'
   if (normalized.includes('usage') || normalized.includes('analytics')) return 'analytics'
+  if (normalized.includes('multiagent')) return 'multiagent'
   if (normalized.includes('combos')) return 'combos'
   if (normalized.includes('providers') || normalized.includes('connections')) return 'connections'
   if (normalized.includes('profile') || normalized.includes('settings')) return 'settings'
