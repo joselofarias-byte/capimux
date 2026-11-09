@@ -333,6 +333,8 @@
   // Codex completes its login on a server-owned loopback listener, so the
   // modal watches the server instead of the browser callback page.
   let codexPollTimer: ReturnType<typeof setInterval> | null = $state(null)
+  let codexCliSessionId = $state('')
+  let codexCliMode = $state(false)
 
   function dashboardCallback(): string {
     return dashboardCallbackURL(dashboardOrigin())
@@ -1357,33 +1359,15 @@
     showOAuthModal = true
     isLaunchingOAuth = true
 
-    // Codex gets a server-side begin endpoint. The browser opens this local
-    // URL directly from the tap; the Go server creates PKCE, starts the fixed
-    // 1455 callback listener, registers the session and 302-redirects to
-    // OpenAI. This avoids the Android about:blank dead-end entirely.
+    // Codex opens /api/oauth/codex/begin inside the tap. The server creates
+    // PKCE, starts the port-1455 listener and 302s to OpenAI. Awaiting the
+    // Codex CLI or that listener first is the HONOR 200 failure, and an
+    // about:blank tab never finishes there. CLI login is only the recovery
+    // when this tab is blocked: the begin request was not sent, so starting
+    // the CLI cannot tear the listener down underneath it.
     if (providerId === 'codex') {
       try {
-        const state =
-          typeof crypto !== 'undefined' && 'randomUUID' in crypto
-            ? crypto.randomUUID().replaceAll('-', '')
-            : Math.random().toString(36).slice(2) + Date.now().toString(36)
-        const appPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
-
-        pkceState = state
-        pkceRedirectUri = CODEX_REDIRECT_URI
-        pkceCodeVerifier = ''
-        rememberPending({ state, redirectUri: CODEX_REDIRECT_URI })
-
-        const q = new URLSearchParams({ app_port: appPort, state })
-        oauthAuthUrl = `/api/oauth/codex/begin?${q.toString()}`
-
-        stopCodexPoll()
-        codexPollTimer = setInterval(pollCodexStatus, 1500)
-
-        const popup = window.open(oauthAuthUrl, '_blank')
-        if (!popup) {
-          oauthError = 'The browser blocked the login tab. Tap Open below to continue.'
-        }
+        await launchCodexBegin()
       } catch (err) {
         stopCodexPoll()
         oauthError = `Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`
@@ -1436,6 +1420,116 @@
     }
   }
 
+  function codexBeginURL(): string {
+    const state =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID().replaceAll('-', '')
+        : Math.random().toString(36).slice(2) + Date.now().toString(36)
+    const appPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
+    pkceState = state
+    pkceRedirectUri = CODEX_REDIRECT_URI
+    pkceCodeVerifier = ''
+    const q = new URLSearchParams({ app_port: appPort, state })
+    return `/api/oauth/codex/begin?${q.toString()}`
+  }
+
+  function watchCodexBegin() {
+    stopCodexPoll()
+    codexPollTimer = setInterval(pollCodexStatus, 1500)
+  }
+
+  function rememberCodexBegin() {
+    rememberPending({ state: pkceState, redirectUri: CODEX_REDIRECT_URI })
+  }
+
+  async function launchCodexBegin() {
+    const beginUrl = codexBeginURL()
+    oauthAuthUrl = beginUrl
+    const popup = typeof window !== 'undefined' ? window.open(beginUrl, '_blank') : null
+    if (popup) {
+      rememberCodexBegin()
+      watchCodexBegin()
+      return
+    }
+    // No request was sent. Polling now would see "unknown" and wipe the
+    // fallback message before the user can tap Open.
+    await recoverBlockedCodexLogin(beginUrl)
+  }
+
+  // The begin navigation did not happen, so the loopback listener is not
+  // running. Main's preferred login is the installed Codex CLI; if that
+  // binary is absent, the Open button still targets the begin URL.
+  async function recoverBlockedCodexLogin(beginUrl: string) {
+    const delegated = await openCodexCLILogin()
+    if (delegated) {
+      oauthError = 'The browser blocked the login tab. Tap Reopen login below to continue.'
+      return
+    }
+    oauthAuthUrl = beginUrl
+    rememberCodexBegin()
+    oauthError = 'The browser blocked the login tab. Tap Open below to continue.'
+  }
+
+  function openOAuthUrl() {
+    if (!oauthAuthUrl || typeof window === 'undefined') return
+    window.open(oauthAuthUrl, '_blank')
+    if (providerId === 'codex' && !codexCliMode) watchCodexBegin()
+  }
+
+  // Official Codex CLI login from main. Called only after the begin tab was
+  // blocked, so there is no about:blank reservation: the Reopen button is the
+  // fresh gesture that navigates to the CLI authorization URL.
+  async function openCodexCLILogin(): Promise<boolean> {
+    const res = await api.codexCLIStartLogin()
+    if (!res.success) {
+      if (res.reason === 'codex_not_found') return false
+      throw new Error(
+        res.reason === 'url_timeout'
+          ? 'Codex CLI started but did not provide an authorization URL'
+          : 'Codex CLI login could not be started',
+      )
+    }
+    if (!res.sessionId || !res.authUrl) {
+      throw new Error('Codex CLI login returned an incomplete session')
+    }
+
+    stopCodexPoll()
+    codexCliMode = true
+    codexCliSessionId = res.sessionId
+    pkceState = res.sessionId
+    oauthAuthUrl = res.authUrl
+    showOAuthModal = true
+    codexPollTimer = setInterval(pollCodexCLIStatus, 1500)
+    return true
+  }
+
+  async function pollCodexCLIStatus() {
+    if (!codexCliSessionId) return
+    try {
+      const res = await api.codexCLIStatus(codexCliSessionId)
+      if (res.status === 'done') {
+        stopCodexPoll()
+        codexCliSessionId = ''
+        codexCliMode = false
+        showOAuthModal = false
+        onRefresh()
+      } else if (res.status === 'error') {
+        stopCodexPoll()
+        codexCliSessionId = ''
+        oauthError = res.error || 'Codex CLI authorization failed'
+      } else if (res.status === 'unknown') {
+        stopCodexPoll()
+        codexCliSessionId = ''
+        oauthError = 'The Codex CLI login session is no longer available. Click Login to try again.'
+      }
+    } catch {
+      // A transient dashboard request failure should not kill an active login.
+    }
+  }
+
+  // Codex redirects the browser to a fixed loopback port, so the server needs
+  // that listener running before the popup opens — otherwise the callback dies
+  // on a closed port and the login can never complete.
   async function startCodexLoopback() {
     stopCodexPoll()
     const proxy = await api.codexStartProxy({
@@ -1491,6 +1585,12 @@
     stopDevicePoll()
     stopCodexPoll()
     if (providerId === 'codex') {
+      codexCliMode = false
+      if (codexCliSessionId) {
+        const sessionId = codexCliSessionId
+        codexCliSessionId = ''
+        void api.codexCLICancel(sessionId).catch(() => {})
+      }
       void api.codexStopProxy().catch(() => {})
     }
   }
@@ -4119,7 +4219,7 @@
             <p class="text-2xl font-mono font-bold tracking-[0.3em] text-text-main select-all">{deviceUserCode}</p>
           </div>
         {/if}
-        {#if oauthAuthUrl}
+        {#if oauthAuthUrl && !(providerId === 'codex' && codexCliMode)}
           <div>
             <p class="text-sm font-medium mb-1">Step 1: Open this URL in your browser</p>
           <div class="flex gap-2">
@@ -4130,8 +4230,9 @@
             />
             <button
               type="button"
-              onclick={() => window.open(oauthAuthUrl, '_blank')}
-              class="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-md border border-border bg-surface-2 hover:bg-surface-3 text-text-main cursor-pointer"
+              onclick={openOAuthUrl}
+              disabled={isLaunchingOAuth}
+              class="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-md border border-border bg-surface-2 hover:bg-surface-3 text-text-main cursor-pointer disabled:opacity-50"
             >
               <span class="material-symbols-outlined text-sm">open_in_new</span>
               Open
@@ -4171,6 +4272,15 @@
             </div>
           </div>
         {/if}
+        {#if providerId === 'codex' && codexCliMode}
+          <div class="p-4 border border-border rounded-md bg-sidebar/50 text-center">
+            <span class="material-symbols-outlined text-xl animate-spin text-primary">progress_activity</span>
+            <p class="text-sm font-medium text-text-main mt-2">Waiting for browser authorization…</p>
+            <p class="text-[11px] text-text-muted mt-1">
+              Nothing to paste or submit here. Finish signing in in the browser and this dialog will close automatically.
+            </p>
+          </div>
+        {:else}
         <div>
           <p class="text-sm font-medium mb-1">
             {providerId === 'freebuff'
@@ -4200,12 +4310,26 @@
                   : 'Paste the access token here, then click Connect.'}
           </p>
         </div>
+        {/if}
 
         {#if oauthError}
           <p class="text-xs text-red-500">{oauthError}</p>
         {/if}
 
         <div class="flex gap-2 pt-2">
+          {#if providerId === 'codex' && codexCliMode}
+          <button
+            type="button"
+            onclick={() => {
+              if (oauthAuthUrl && typeof window !== 'undefined') {
+                window.open(oauthAuthUrl, '_blank', 'width=600,height=700')
+              }
+            }}
+            class="flex-1 py-1.5 text-xs font-semibold rounded-[8px] bg-surface-2 hover:bg-surface-3 text-text-main border border-border cursor-pointer"
+          >
+            Reopen login
+          </button>
+          {:else}
           <button
             type="button"
             onclick={() => {
@@ -4220,9 +4344,14 @@
           >
             {isConnecting ? 'Checking…' : deviceUserCode ? 'Check now' : providerId === 'freebuff' ? 'Check & Connect' : 'Connect'}
           </button>
+          {/if}
           <button
             type="button"
             onclick={() => {
+              if (providerId === 'codex') {
+                closeOAuthModal()
+                return
+              }
               showOAuthModal = false
               stopDevicePoll()
               if (freebuffPollTimer) {

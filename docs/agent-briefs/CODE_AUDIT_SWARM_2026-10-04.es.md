@@ -99,6 +99,7 @@ Verificar que los paquetes Fabric listados en `docs/FABRIC_PORT_MANIFEST.md` rea
 
 ## Pasada B — segunda revisión fuerte e independiente
 
+
 Usar uno de los mejores modelos disponibles fuera de la primera pasada, por ejemplo Astra/Sol/Codex especializado, sobre los hallazgos P0/P1 y zonas críticas.
 
 Candidatos de programación cuando estén disponibles:

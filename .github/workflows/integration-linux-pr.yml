@@ -1,0 +1,53 @@
+name: Capimux integration Linux binaries
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - '**/*.pgo'
+      - go.mod
+      - go.sum
+      - VERSION
+      - web/**
+      - scripts/build-integration-linux.sh
+      - .github/workflows/integration-linux-pr.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-linux-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  linux-binaries:
+    if: startsWith(github.head_ref, 'integration/capimux-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Compilar dashboard una sola vez
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Compilar Linux AMD64 y ARM64 y verificar reproducibilidad
+        run: bash scripts/build-integration-linux.sh "$RUNNER_TEMP/capimux-linux"
+      - name: Publicar binarios de prueba y checksums (no release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: capimux-linux-pr${{ github.event.pull_request.number }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/capimux-linux/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
