@@ -533,7 +533,43 @@ export function normalizeConnection(c: ProviderConnection): ProviderConnection {
 }
 
 // Connections API
+export interface MultiagentResult {
+  model: string
+  output?: string
+  error?: string
+  duration_ms: number
+}
+
+export interface MultiagentPolicy {
+  models: string[]
+  external_enabled: boolean
+  max_models: number
+  max_output_tokens: number
+}
+
+export type MultiagentTask = 'programming' | 'review' | 'analysis' | 'conversation' | 'translation' | 'reasoning'
+export type MultiagentStrategy = 'parallel' | 'priority' | 'fallback' | 'round-robin' | 'manual'
+
+export interface MultiagentRequest {
+  task?: MultiagentTask
+  strategy?: MultiagentStrategy
+  prompt: string
+  models: string[]
+  concurrency: number
+  timeout_ms: number
+  allow_external: boolean
+  dry_run: boolean
+}
+
 export const api = {
+  getMultiagentPolicy: (signal?: AbortSignal) =>
+    request<MultiagentPolicy>('/api/multiagent/policy', { signal }),
+  runMultiagent: (payload: MultiagentRequest, signal?: AbortSignal) =>
+    request<{ results: MultiagentResult[]; dry_run?: boolean }>('/api/multiagent/run', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    }),
   // Connections
   getConnections: async () => {
     const conns = await request<ProviderConnection[]>('/api/connections')
@@ -1181,3 +1217,4 @@ export const api = {
     localStorage.removeItem('9router_auth')
   },
 }
+

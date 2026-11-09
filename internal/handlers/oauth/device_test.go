@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -98,7 +99,6 @@ type devicePollFixture func(*http.Request) (*http.Response, error)
 
 func (f devicePollFixture) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-
 func TestGrokCLIProxyHeadersCurrentAndOverride(t *testing.T) {
 	t.Setenv("GROK_CLI_CLIENT_VERSION", "1.2.3-test")
 	h := providers.GrokCLIProxyHeaders("token-value")
@@ -120,4 +120,83 @@ func TestGrokCLIProxyHeadersCurrentAndOverride(t *testing.T) {
 	if !strings.HasPrefix(h["User-Agent"], "grok-shell/1.2.3-test (") {
 		t.Fatalf("user agent = %q", h["User-Agent"])
 	}
+}
+
+func TestGrokCLIDeviceFlowUsesSharedIdentity(t *testing.T) {
+	t.Setenv("GROK_CLI_CLIENT_VERSION", "1.0.45")
+	var sawStart, sawToken, sawUser bool
+	original := deviceClient
+	deviceClient = &http.Client{Transport: devicePollFixture(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "grok-shell/1.0.45 (") {
+			t.Errorf("%s user agent = %q", r.URL.Path, r.Header.Get("User-Agent"))
+		}
+		switch r.URL.Path {
+		case "/oauth2/device/code":
+			sawStart = true
+			return deviceJSON(http.StatusOK, `{"device_code":"dc","user_code":"uc","verification_uri":"https://example.test","expires_in":300,"interval":5}`), nil
+		case "/oauth2/token":
+			sawToken = true
+			return deviceJSON(http.StatusOK, `{"access_token":"access-secret","refresh_token":"refresh-secret"}`), nil
+		case "/v1/user":
+			sawUser = true
+			if r.Header.Get("x-grok-client-version") != "1.0.45" ||
+				r.Header.Get("x-grok-client-identifier") != "grok-shell" ||
+				r.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" ||
+				r.Header.Get("x-authenticateresponse") != "authenticate-response" ||
+				r.Header.Get("x-grok-client-mode") != "headless" {
+				t.Errorf("cli-chat-proxy identity headers = %v", redactedDeviceHeaders(r.Header))
+			}
+			if r.Header.Get("Authorization") != "Bearer access-secret" {
+				t.Error("cli-chat-proxy authorization header did not use the device access token")
+			}
+			return deviceJSON(http.StatusOK, `{"email":"user@example.com","name":"User"}`), nil
+		default:
+			t.Errorf("unexpected device request %s", r.URL.Path)
+			return deviceJSON(http.StatusNotFound, `{}`), nil
+		}
+	})}
+	t.Cleanup(func() { deviceClient = original })
+
+	start, err := grokcliStart(context.Background())
+	if err != nil {
+		t.Fatalf("grokcliStart: %v", err)
+	}
+	if start["device_code"] != "dc" {
+		t.Fatalf("device_code = %v", start["device_code"])
+	}
+	tokens, err := grokcliPoll(context.Background(), "dc")
+	if err != nil {
+		t.Fatalf("grokcliPoll: %v", err)
+	}
+	if tokens.email != "user@example.com" || tokens.name != "User" {
+		t.Fatalf("profile name/email = %q / %q", tokens.name, tokens.email)
+	}
+	if tokens.access != "access-secret" || tokens.refresh != "refresh-secret" {
+		t.Fatal("device tokens were not kept from the token response")
+	}
+	if !sawStart || !sawToken || !sawUser {
+		t.Fatalf("saw start=%v token=%v user=%v", sawStart, sawToken, sawUser)
+	}
+}
+
+func deviceJSON(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func redactedDeviceHeaders(h http.Header) map[string]string {
+	out := map[string]string{}
+	for _, key := range []string{
+		"User-Agent", "X-Grok-Client-Version", "X-Grok-Client-Identifier",
+		"X-Xai-Token-Auth", "X-Authenticateresponse", "X-Grok-Client-Mode",
+	} {
+		out[key] = h.Get(key)
+	}
+	if h.Get("Authorization") != "" {
+		out["Authorization"] = "present"
+	}
+	return out
 }

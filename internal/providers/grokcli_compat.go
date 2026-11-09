@@ -10,7 +10,8 @@ import (
 // GrokCLIDefaultClientVersion tracks the official Grok Build client identity
 // accepted by cli-chat-proxy. GROK_CLI_CLIENT_VERSION is an emergency runtime
 // override for xAI version gates so a server-side minimum bump does not require
-// waiting for a new 9router binary.
+// waiting for a new Capimux binary. 1.0.45 is the identity captured in Oct 2026;
+// xAI may have moved on, and changing it is an explicit product decision.
 const GrokCLIDefaultClientVersion = "1.0.45"
 
 func GrokCLIClientVersion() string {

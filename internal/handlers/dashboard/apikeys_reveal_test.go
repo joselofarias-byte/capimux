@@ -16,6 +16,7 @@ func TestApiKeysRevealForDashboardSession(t *testing.T) {
 	createBody := map[string]any{"name": "Reveal Key"}
 	bodyBytes, _ := json.Marshal(createBody)
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(bodyBytes))
+	asDashboardAdmin(t, req)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

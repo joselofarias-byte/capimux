@@ -139,7 +139,7 @@ bench-go:
 # Instead the per-target OS/ARCH go through `export`, which is a Make directive
 # and therefore identical under sh and cmd. The export is scoped to cross-one
 # so an empty GOARCH can never leak into the normal build target.
-CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+CROSS_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 android-arm64
 
 ifneq ($(filter cross-one,$(MAKECMDGOALS)),)
 export GOOS := $(CROSS_OS)
