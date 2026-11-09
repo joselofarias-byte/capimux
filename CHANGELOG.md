@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Android beta 0.1.1 replaces manual comparator model IDs with a searchable provider-grouped checklist, remembers up to eight selections and applies changes without restarting the engine. The picker uses the connected/noAuth catalog through an admin-only API. The Android checklist stays at eight; the env allowlist still advertises main's server cap (`maxModels`, 10) when no private policy file is set. Intentional Capimux fork extension.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
