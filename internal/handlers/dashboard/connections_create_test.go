@@ -19,6 +19,7 @@ func postConnection(t *testing.T, router http.Handler, body string) *httptest.Re
 
 func TestHandleCreateConnection_StoresModalFields(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 
@@ -77,6 +78,7 @@ func TestHandleCreateConnection_StoresModalFields(t *testing.T) {
 
 func TestHandleCreateConnection_DefaultsPriorityToNextFreeSlot(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 
@@ -105,6 +107,7 @@ func TestHandleCreateConnection_DefaultsPriorityToNextFreeSlot(t *testing.T) {
 
 func TestHandleCreateConnection_KeepsLegacyDataString(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 
@@ -128,6 +131,7 @@ func TestHandleCreateConnection_KeepsLegacyDataString(t *testing.T) {
 
 func TestHandleCreateConnection_RequiresProvider(t *testing.T) {
 	repo, cleanup := setupTestDB(t)
+	openDashboard(t, repo)
 	defer cleanup()
 	router := setupTestRouter(repo)
 

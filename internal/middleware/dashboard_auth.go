@@ -24,6 +24,9 @@ func IsAlwaysProtectedPath(path string) bool {
 		"/api/version/update",
 		"/admin/health/reset",
 		"/api/oauth/cursor/auto-import",
+		"/api/oauth/grok-cli/bulk-import",
+		"/api/multiagent/run",
+		"/api/multiagent/policy",
 		"/api/oauth/kiro/auto-import":
 		return true
 	default:
@@ -124,3 +127,4 @@ func tunnelPageBlocked(repo *db.Repo, r *http.Request) bool {
 	}
 	return auth.TunnelLoginBlocked(r, raw)
 }
+
