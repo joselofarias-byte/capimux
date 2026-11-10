@@ -76,7 +76,16 @@ func (r *Repo) GetProxyPool(poolID string) (*ProxyPool, error) {
 	}
 
 	if cached, ok := proxyPoolCache.Load(poolID); ok {
-		if pool, ok := cached.(*ProxyPool); ok {
+		if old, ok := cached.(*ProxyPool); ok {
+			if sameProxyPoolConfig(old, pool) {
+				return old, nil
+			}
+			// The row changed under the cache (another process sharing the DB,
+			// or a write that bypassed the Repo invalidation). Publish a fresh
+			// immutable object and keep the round-robin cursor. A stale cache
+			// could keep a pool non-strict after strictProxy was turned on.
+			atomic.StoreUint64(&pool.index, atomic.LoadUint64(&old.index))
+			proxyPoolCache.Store(poolID, pool)
 			return pool, nil
 		}
 	}
@@ -90,12 +99,31 @@ func (r *Repo) GetProxyPool(poolID string) (*ProxyPool, error) {
 	return pool, nil
 }
 
+func sameProxyPoolConfig(a, b *ProxyPool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.ID != b.ID || a.Name != b.Name || a.IsActive != b.IsActive ||
+		a.Strategy != b.Strategy || a.Type != b.Type || a.NoProxy != b.NoProxy ||
+		a.StrictProxy != b.StrictProxy || len(a.URLs) != len(b.URLs) {
+		return false
+	}
+	for i := range a.URLs {
+		if a.URLs[i] != b.URLs[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // NextURL returns the next proxy URL using round-robin selection.
 func (p *ProxyPool) NextURL() string {
 	if len(p.URLs) == 0 {
 		return ""
 	}
-	idx := atomic.AddUint64(&p.index, 1)
+	// AddUint64 returns the incremented value; subtract one so the first call
+	// uses URLs[0] and the rotation does not skip the first configured proxy.
+	idx := atomic.AddUint64(&p.index, 1) - 1
 	return p.URLs[idx%uint64(len(p.URLs))]
 }
 

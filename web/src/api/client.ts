@@ -547,7 +547,12 @@ export interface MultiagentPolicy {
   max_output_tokens: number
 }
 
+export type MultiagentTask = 'programming' | 'review' | 'analysis' | 'conversation' | 'translation' | 'reasoning'
+export type MultiagentStrategy = 'parallel' | 'priority' | 'fallback' | 'round-robin' | 'manual'
+
 export interface MultiagentRequest {
+  task?: MultiagentTask
+  strategy?: MultiagentStrategy
   prompt: string
   models: string[]
   concurrency: number

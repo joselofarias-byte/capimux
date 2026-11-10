@@ -1,26 +1,36 @@
-# Comparador multimodelo de Capimux
+# Comparador multimodelo de Capimux — JolufaSoft
 
-La pestaña Comparador permite enviar una tarea a hasta ocho modelos y muestra cada respuesta por separado, en el orden seleccionado. Un fallo de un modelo no elimina las otras respuestas.
+El comparador permite elegir de **2 a 10 modelos por tarea**, sin imponer nombres de modelos ni proveedores. Se mantiene la selección de un único modelo para compatibilidad y para ejecución manual. Configurá conexiones autorizadas antes de usarlas.
 
-## Configuración del servidor
+## Política y privacidad
 
-- Configurá primero las conexiones de proveedores en el dashboard.
-- Definí CAPIMUX_MULTIAGENT_ALLOWED_MODELS con los identificadores exactos de tus modelos, separados por coma. El selector muestra exclusivamente esta lista; no presupone modelos o proveedores disponibles.
-- Definí CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL=1 para habilitar envíos. Sin esa variable solo funciona la simulación.
-- Iniciá sesión en el dashboard. Las rutas del comparador siempre exigen sesión administrativa o el token CLI local, incluso con requireLogin desactivado. Las claves de inferencia no habilitan estas operaciones.
+- `CAPIMUX_MULTIAGENT_ALLOWED_MODELS`: identificadores exactos `proveedor/modelo`, separados por coma. Es una lista del operador, no prueba de disponibilidad, saldo ni gratuidad.
+- `CAPIMUX_MULTIAGENT_ENABLE_EXTERNAL=1`: habilita envíos. Sin esa variable solo se permite simulación.
+- Las rutas del comparador exigen sesión administrativa o token CLI local incluso con `requireLogin` desactivado. Las claves de inferencia no habilitan estas operaciones.
+- Los perfiles son **locales al navegador**, uno por tarea: guardan estrategia y modelos ordenados, nunca prompt, respuesta ni credenciales. No son sincronización entre dispositivos. Al cargarlos se eliminan modelos fuera de la política actual. Se pueden borrar desde la misma vista.
+- El comparador no agrega logs de contenido. Reutiliza el registro de uso del router; revisá la configuración de diagnósticos antes de habilitarlos. `CAPIMUX_REQUEST_DETAILS_RETENTION_DAYS` controla los detalles locales entre 1 y 365 días (predeterminado: 7). Esto no es una política universal de borrado de todas las tablas de uso ni de backups.
 
-Seleccioná modelos, escribí la tarea y validá la selección. Para obtener respuestas, desmarcá la simulación, seleccioná el envío a proveedores y pulsá Ejecutar en paralelo.
+## Tareas y estrategias
 
-## Límites y resultados
+Tareas: programación, revisión, análisis, conversación, traducción y razonamiento. La tarea **clasifica el perfil, no altera el prompt ni lo envía a modelos adicionales**.
 
-Máximo ocho modelos por lote, tres llamadas simultáneas por defecto y dos lotes activos en el proceso. Cada llamada dispone de 60 segundos por defecto, contados desde su inicio, y solicita como máximo 4096 tokens de salida. Se limita a 1 MiB el buffer del adaptador por respuesta. Estos límites no constituyen un presupuesto monetario.
+| Estrategia | Comportamiento |
+|---|---|
+| En paralelo (predeterminada) | Ejecuta todos los modelos elegidos y conserva el orden de resultados. Un error no borra otras respuestas. |
+| Prioridad / respaldo | Recorre el orden elegido hasta el primer éxito. Solo avanza tras HTTP 429 o 5xx explícito. Cada modelo aparece una vez. |
+| Rotación | Elige uno por lote usando un contador del handler en memoria; se reinicia al reiniciar el proceso y comparte turno entre listas/tareas. No es balanceo distribuido. |
+| Manual | Ejecuta únicamente el primer modelo de la selección ordenada. |
 
-Cancelar o salir de la vista aborta la solicitud y propaga la cancelación al proveedor. Un proveedor puede haber procesado trabajo antes de recibirla.
+Prioridad y respaldo son dos etiquetas para la misma política secuencial conservadora. No se avanza por timeout, desconexión, error ambiguo de transporte, respuesta vacía/inválida o respuesta excesiva: el proveedor podría haber procesado la llamada. No existe garantía de ejecución exactamente una vez; incluso un 5xx puede representar trabajo ya realizado por un proveedor. El router de chat subyacente conserva sus propias políticas de cuentas y combos: estas reglas describen únicamente los saltos añadidos por el comparador.
 
-El envío reutiliza el handler de chat: conserva selección de proveedor, rotación de cuentas y registro de uso. El comparador solicita respuestas sin streaming y no ejecuta herramientas devueltas por los modelos. Contenido vacío, timeout y respuesta excesiva aparecen como errores individuales. El endpoint de política y la simulación no prueban conectividad ni saldo del proveedor.
+## Límites y API
+
+Diez modelos por lote, tres llamadas simultáneas por defecto y dos lotes activos en el proceso. Cada llamada dispone de 60 segundos por defecto (hasta 120 configurables), como máximo 4096 tokens de salida y un buffer de respuesta de 1 MiB. No es un presupuesto monetario.
+
+`POST /api/multiagent/run` agrega campos opcionales `task` (`programming`, `review`, `analysis`, `conversation`, `translation`, `reasoning`) y `strategy` (`parallel`, `priority`, `fallback`, `round-robin`, `manual`). Omitirlos conserva el comportamiento anterior. Valores desconocidos responden 400. La política anuncia `max_models: 10`; no hay migración de base de datos.
+
+Cancelar o salir de la vista aborta la solicitud y propaga cancelación al proveedor. La cancelación no revierte trabajo ya procesado. El comparador usa Chat Completions **sin streaming** y no ejecuta herramientas. SSE, Responses y herramientas dependen de la ruta/proveedor, no de esta vista.
 
 ## Verificación
 
-Las pruebas de integración usan el router y la base de datos reales con proveedores HTTP simulados: verifican autenticación, selección exacta, simulación sin llamadas y dos respuestas independientes. Las pruebas unitarias comprueban concurrencia, cancelación antes del envío y límites de respuesta. No requieren credenciales de proveedores reales.
-
-Esta funcionalidad es una extensión del fork; no modifica los contratos de inferencia de decolua/9router.
+Las pruebas unitarias cubren límites, listas autorizadas, orden, estrategias, cancelación, errores y no exposición del cuerpo de error del proveedor. La integración con el router real usa base temporal y upstream HTTP simulado. La simulación verifica selección, **no conectividad**. Para AGY/OpenCode consultá [AGY-OPENCODE.es.md](AGY-OPENCODE.es.md).

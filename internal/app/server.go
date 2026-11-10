@@ -16,7 +16,6 @@ import (
 
 	"9router/proxy/internal/config"
 	"9router/proxy/internal/controlplane/discovery"
-	"9router/proxy/internal/controlplane/registry"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy/oauth"
@@ -55,8 +54,12 @@ func ProvideServer(p ServerParams) *http.Server {
 		addr = fmt.Sprintf(":%d", p.Config.Port)
 	}
 	server := &http.Server{
-		Addr:    addr,
-		Handler: p.Handler,
+		Addr:              addr,
+		Handler:           p.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		// WriteTimeout must remain zero for long-lived SSE and WebSocket responses.
 	}
 
 	p.Lifecycle.Append(fx.Hook{
@@ -65,8 +68,8 @@ func ProvideServer(p ServerParams) *http.Server {
 			// upstream-reconcile. Keep Fabric's registry alive before the first
 			// request; otherwise free/free-best sees a nil state even though the
 			// ordinary model catalog has already synchronized.
-			if err := registry.InitRegistry(p.DB); err != nil {
-				log.Printf("[config] registry init warning: %v", err)
+			if err := initControlPlane(p.DB); err != nil {
+				return err
 			}
 
 			// Seed the compiled zero-credential free lanes immediately. The

@@ -124,8 +124,14 @@ func (a *OrcaRouterAdapter) Discover(ctx context.Context) ([]Candidate, error) {
 		modelID := mData.ID
 		pricingMode := "paid"
 
-		// Infer free tier from endpoint heuristics or cost metrics if available
-		if mData.Pricing.Mode != "" && mData.Pricing.Mode != "paid" {
+		// Infer free tier from endpoint heuristics or cost metrics if available.
+		// With CAPIMUX_DISCOVERY_STRICT_PRICING=1 (audit #98 A1, off by default)
+		// a positive advertised cost is authoritative: no pricing mode, free
+		// endpoint or model-name heuristic can relabel that offer as free.
+		hasPositiveCost := mData.Cost != nil && (mData.Cost.Prompt > 0 || mData.Cost.Completion > 0)
+		if hasPositiveCost && StrictPricingEnabled() {
+			pricingMode = "paid"
+		} else if mData.Pricing.Mode != "" && mData.Pricing.Mode != "paid" {
 			pricingMode = mData.Pricing.Mode
 		} else if mData.Pricing.Mode == "paid" {
 			pricingMode = "paid"
