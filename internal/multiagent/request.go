@@ -21,9 +21,12 @@ func decodeRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 		return req, errors.New("trailing JSON")
 	}
 	if strings.TrimSpace(req.Prompt) == "" || len(req.Prompt) > 20000 ||
-		len(req.Models) == 0 || len(req.Models) > 8 ||
-		req.Concurrency < 0 || req.Concurrency > 8 || req.TimeoutMS < 0 || req.TimeoutMS > 120000 {
+		len(req.Models) == 0 || len(req.Models) > maxModels ||
+		req.Concurrency < 0 || req.Concurrency > maxModels || req.TimeoutMS < 0 || req.TimeoutMS > 120000 {
 		return req, errors.New("invalid limits")
+	}
+	if !validTask(req.Task) || !validStrategy(req.Strategy) {
+		return req, errors.New("invalid task or strategy")
 	}
 	seen := make(map[string]bool, len(req.Models))
 	for _, model := range req.Models {

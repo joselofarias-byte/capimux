@@ -660,6 +660,12 @@ Comandos corridos de verdad en un worktree limpio en `60de720c` (`git status` va
 
 Este documento no contiene claves, secretos ni tokens.
 
+## Auditoría fase 1 en main (#130, rama `fix/audit-phase1-main`)
+
+- La rama sale de `origin/main`. Porta los fixes de seguridad de #130 que faltaban: cap de 1 MiB en OAuth, endpoint `/v1/messages`, `strictProxy` fail-closed y refresh del caché de pools con round-robin. Todos tienen tests. #130 sigue abierto y sin cambio de base.
+- Partes pendientes con impacto de seguridad, portadas con opt-in apagado: arranque estricto del control plane, validación de política en `explain-route`, snapshot que preserva cuentas y pricing estricto de OrcaRouter.
+- Partes no portadas: routing adaptativo A4 (pendiente de #144), el workflow vivo `provider-live.yml` (sin llamadas vivas) y las rutas admin A7 (las cubre #142, ya mergeado, con `RequireAdminAuth`).
+- Detalle en `docs/audit-phase1-pending.es.md`. Falta que el propietario decida qué hacer con #130: retarget a main, apuntarlo a esta rama o abrir un PR nuevo.
 ### Cierre de verificación de #142 — Free Best: failover solo en rutas gratuitas elegibles (31/10, 15:20 UTC-3)
 
 - **Rama:** `cursor/free-best-engine-f768`. Se mergeó `main` `3e1e05b2` y quedó el merge commit `9839a3b7`.
