@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- MITM: si el upstream corta un cuerpo JSON antes de terminar y el status todavía no salió al cliente, la respuesta es HTTP 502 `mitm_error` (antes la conexión se cerraba en silencio: status 0 y body vacío). Si el status ya se escribió, se resetea la conexión TCP y el error se registra sin headers, tokens ni cuerpos.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.

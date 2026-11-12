@@ -3,10 +3,13 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	"9router/proxy/internal/log"
 )
 
 var proxyBase = "http://localhost:20130"
@@ -62,16 +65,103 @@ func PipeSSE(upstream *http.Response, w http.ResponseWriter) error {
 	return nil
 }
 
+const upstreamTruncatedMsg = "upstream response truncated"
+
+// upstreamPipeError is a failed JSON copy. wroteHeader is true when the
+// status line already reached the client, so a 502 can no longer be sent.
+type upstreamPipeError struct {
+	err         error
+	wroteHeader bool
+}
+
+func (e *upstreamPipeError) Error() string {
+	if e == nil || e.err == nil {
+		return upstreamTruncatedMsg
+	}
+	return e.err.Error()
+}
+
+func (e *upstreamPipeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
 // PipeJSON copies a non-streaming JSON response from upstream to the mitm client.
+// The body is read in full before any status line is written. A short read
+// returns an error and leaves the client response unstarted.
 func PipeJSON(upstream *http.Response, w http.ResponseWriter) error {
 	body, err := io.ReadAll(upstream.Body)
 	if err != nil {
-		return err
+		return &upstreamPipeError{err: err, wroteHeader: headerWriterCommitted(w)}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(upstream.StatusCode)
-	w.Write(body)
+	if _, werr := w.Write(body); werr != nil {
+		return &upstreamPipeError{err: fmt.Errorf("write JSON response: %w", werr), wroteHeader: true}
+	}
 	return nil
+}
+
+// pipeUpstream forwards an upstream response. JSON is buffered first.
+// Streaming SSE keeps its existing prefix-forwarding behavior.
+func pipeUpstream(w http.ResponseWriter, upstream *http.Response, stream bool) {
+	if stream {
+		PipeSSE(upstream, w)
+		return
+	}
+	if err := PipeJSON(upstream, w); err != nil {
+		failJSONPipe(w, err)
+	}
+}
+
+func failJSONPipe(w http.ResponseWriter, err error) {
+	if jsonHeadersSent(err) {
+		// Log the read error only. Do not attach headers or the body:
+		// both can carry bearer tokens and credentials.
+		log.Error("mitm", "upstream JSON truncated after headers were sent; closing connection", "error", err)
+		abortClient(w)
+		return
+	}
+	SendError(w, http.StatusBadGateway, upstreamTruncatedMsg)
+}
+
+func jsonHeadersSent(err error) bool {
+	var pe *upstreamPipeError
+	return errors.As(err, &pe) && pe.wroteHeader
+}
+
+type headerCommitter interface {
+	WroteHeader() bool
+}
+
+func headerWriterCommitted(w http.ResponseWriter) bool {
+	c, ok := w.(headerCommitter)
+	return ok && c.WroteHeader()
+}
+
+type connAborter interface {
+	Abort()
+}
+
+// abortClient cuts a response whose status line is already on the wire.
+// A clean close would make a missing Content-Length look like a finished
+// body, so the MITM writer resets the TCP connection. net/http.Server
+// still gets ErrAbortHandler when the writer cannot abort itself.
+func abortClient(w http.ResponseWriter) {
+	if a, ok := w.(connAborter); ok {
+		a.Abort()
+		return
+	}
+	if hj, ok := w.(http.Hijacker); ok {
+		conn, _, err := hj.Hijack()
+		if err == nil && conn != nil {
+			_ = conn.Close()
+			return
+		}
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // SendError writes a JSON error response to the mitm client.
