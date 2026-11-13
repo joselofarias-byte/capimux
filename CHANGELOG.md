@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- TTS NVIDIA: un fallo de transporte en `POST /v1/audio/speech` (puerto cerrado, DNS, proxy) responde 502 con el JSON de error del resto de media (`error.message` / `error.type=server_error` / `error.code=bad_gateway`). Antes `tryNvidiaTTSConn` devolvía `done=true` sin escribir el cuerpo y el cliente veía 200 vacío. El mensaje y el log omiten la URL con credenciales, la query y la API key; el log sigue anotando el proveedor y el modelo resueltos.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.

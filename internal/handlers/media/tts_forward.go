@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	json "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -195,7 +198,12 @@ func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, 
 	client := h.ChatH.GetClientForConnection(connData)
 	resp, err := client.Do(req)
 	if err != nil {
-		return http.StatusBadGateway, "nvidia tts request failed: " + err.Error(), true
+		// done=true stops the account loop. The response has to be written
+		// here: forwardNvidiaTTS treats done as "the client already has a body".
+		msg := nvidiaTTSTransportMessage(err)
+		log.Error("media", "nvidia tts request failed", "provider", modelInfo.Provider, "model", modelInfo.Model, "error", msg)
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, msg)
+		return http.StatusBadGateway, msg, true
 	}
 	defer resp.Body.Close()
 
@@ -229,6 +237,54 @@ func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, 
 	h.trackTTSUsage("nvidia", modelInfo.Model)
 	h.writeTTSResponse(w, r, respFmt, audioBytes, "audio/wav", "wav")
 	return 0, "", true
+}
+
+// urlUserinfoRe and urlQueryRe strip credentials from a transport error that
+// is not a *url.Error. *url.Error carries the full request URL (userinfo and
+// query); that string is never copied into the client body or the log.
+var (
+	urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s]*@`)
+	urlQueryRe    = regexp.MustCompile(`\?[^\s]*`)
+)
+
+// nvidiaTTSTransportMessage is the 502 text for a failed NVIDIA TTS dial.
+// It keeps the operation and the cause, and drops the request URL so a
+// baseUrl with userinfo or an api_key query cannot reach the client or the log.
+func nvidiaTTSTransportMessage(err error) string {
+	detail := safeTransportDetail(err, 0)
+	if detail == "" {
+		return "nvidia tts request failed"
+	}
+	return "nvidia tts request failed: " + detail
+}
+
+func safeTransportDetail(err error, depth int) string {
+	if err == nil {
+		return ""
+	}
+	if depth > 4 {
+		return log.RedactString(stripURLSecrets(err.Error()))
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		cause := ""
+		if urlErr.Err != nil {
+			cause = safeTransportDetail(urlErr.Err, depth+1)
+		}
+		if urlErr.Op == "" {
+			return cause
+		}
+		if cause == "" {
+			return urlErr.Op
+		}
+		return urlErr.Op + ": " + cause
+	}
+	return log.RedactString(stripURLSecrets(err.Error()))
+}
+
+func stripURLSecrets(s string) string {
+	s = urlUserinfoRe.ReplaceAllString(s, "${1}")
+	return urlQueryRe.ReplaceAllString(s, "")
 }
 
 // nvidiaTTSURL honors provider/connection base URL overrides (upstream
