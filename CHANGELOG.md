@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- NVIDIA TTS: si `ClassifyError` marca fallback (4xx de cuenta o 429) o si falla la lectura del audio, la respuesta deja de ser un 200 vacío. Se escribe el JSON `{error:{code,message,type}}` y el bucle de cuentas sigue cortándose igual. El status del fallback es el del upstream. Pendiente, sin cambio: `media.go` cuando `http.NewRequestWithContext` falla en el forwarder genérico.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
