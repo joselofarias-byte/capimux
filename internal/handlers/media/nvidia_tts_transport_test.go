@@ -19,7 +19,7 @@ import (
 
 // Brought from cursor/media-test-coverage-8611 (PR #193) coverage_helpers_test.go.
 // Only the helper this transport test needs.
-func seedConn(t *testing.T, database *sql.DB, id, provider, apiKey, baseURL string, priority int) {
+func seedConn194(t *testing.T, database *sql.DB, id, provider, apiKey, baseURL string, priority int) {
 	t.Helper()
 	data := map[string]any{}
 	if apiKey != "" {
@@ -62,7 +62,7 @@ func TestNvidiaTTSTransportFailureReturns502(t *testing.T) {
 	database, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()
 	baseURL := "http://nvuser:" + userinfo + "@" + addr + "/v1/audio/speech?api_key=" + queryKey
-	seedConn(t, database, "nv-down", "nvidia", apiKey, baseURL, 1)
+	seedConn194(t, database, "nv-down", "nvidia", apiKey, baseURL, 1)
 	h := newTestMediaHandler(db.NewRepo(database))
 
 	log.ClearConsoleLogs()
@@ -119,7 +119,7 @@ func TestNvidiaTTSSuccessStillReturnsAudio(t *testing.T) {
 
 	database, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()
-	seedConn(t, database, "nv-ok", "nvidia", apiKey, srv.URL, 1)
+	seedConn194(t, database, "nv-ok", "nvidia", apiKey, srv.URL, 1)
 	h := newTestMediaHandler(db.NewRepo(database))
 
 	rec := httptest.NewRecorder()
