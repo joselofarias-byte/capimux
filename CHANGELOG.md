@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- MITM: si el upstream corta un cuerpo JSON antes de terminar y el status todavía no salió al cliente, la respuesta es HTTP 502 `mitm_error` (antes la conexión se cerraba en silencio: status 0 y body vacío). Si el status ya se escribió, se resetea la conexión TCP y el error se registra sin headers, tokens ni cuerpos.
+- Seguridad: `go.mod` exige la toolchain `go1.27.4` para cerrar GO-2026-6859 / CVE-2026-97054 (`net/http` de Go 1.27.3, carrera de cabeceras en `MaxBytesReader`). `golang.org/x/crypto` sube de v0.57.0 a v0.59.0 (GO-2026-5932: el paquete `openpgp`, que este repo no importa, sale del módulo) y arrastra `golang.org/x/sys` v0.48.0→v0.50.0, `golang.org/x/text` v0.42.0→v0.44.0 y `golang.org/x/sync` v0.23.0→v0.25.0. En `web/`, parches solo de build: vite 8.3.3, devalue 5.9.3 y source-map-js 1.2.2. `deepmerge@4.3.1` (GHSA-gcqx-w48m-w2h4) queda: 4.3.1 es la última publicada y `@sveltejs/vite-plugin-svelte` pide `^4.3.1`.
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
