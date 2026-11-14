@@ -964,10 +964,11 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
-	log.Info("media", "forwarding to targetURL", "targetURL", targetURL, "method", method, "model", modelInfo.Model)
+	log.Info("media", "forwarding to targetURL", "targetURL", mediaSafeURL(targetURL), "method", method, "model", modelInfo.Model)
 	req, err := http.NewRequestWithContext(r.Context(), method, targetURL, bytes.NewReader(finalBody))
 	if err != nil {
-		log.Error("media", "create request failed", "endpoint", endpoint, "error", err)
+		log.Error("media", "create request failed", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "error", mediaSafeErr(err))
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to create upstream request")
 		return
 	}
 
@@ -1006,7 +1007,7 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	start := time.Now()
 	resp, err := doDirectOrClient(r.Context(), client, req)
 	if err != nil {
-		log.Error("media", "upstream request failed", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connIDStr, "error", err)
+		log.Error("media", "upstream request failed", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connIDStr, "error", mediaSafeErr(err))
 		handlerutil.WriteJSONError(w, http.StatusBadGateway, "upstream request failed")
 		return
 	}
@@ -1014,9 +1015,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024))
-		log.Warn("media", "upstream error", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connIDStr, "status", resp.StatusCode, "body", string(errBody))
+		log.Warn("media", "upstream error", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connIDStr, "status", resp.StatusCode, "body", mediaSafeText(string(errBody)))
 		// Need to re-create body for copying
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	} else if err := ensureMediaBody(resp); err != nil {
+		// The status is not committed yet. A failed read used to fall through
+		// to WriteHeader(200) and an empty copy.
+		log.Error("media", "read upstream response failed", "endpoint", endpoint, "provider", modelInfo.Provider, "model", modelInfo.Model, "conn", connIDStr, "error", mediaSafeErr(err))
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, "failed to read upstream response")
+		return
 	}
 
 	for k, v := range resp.Header {

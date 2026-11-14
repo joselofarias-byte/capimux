@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Media: el forwarder genérico (`forwardMediaRequest`) ya no deja un 200 vacío cuando no puede armar el request ni cuando falla la lectura del cuerpo de una respuesta 2xx antes de escribir. Esos caminos responden 502 JSON (`bad_gateway` / `server_error`). El fallo de transporte ya respondía 502; un status de fallback se sigue reenviando tal cual, sin rotar ni bloquear la cuenta. El log de ese tramo no incluye userinfo, query ni cabeceras con credenciales.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.
