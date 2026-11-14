@@ -17,13 +17,13 @@ import (
 	"time"
 )
 
-// routerPortMu serializes tests that bind the hardcoded router port.
+// routerPortMu187 serializes tests that bind the hardcoded router port.
 // FetchRouter always dials http://localhost:20130 (handlers/base.go).
-var routerPortMu sync.Mutex
+var routerPortMu187 sync.Mutex
 
-const systemCAPath = "/usr/local/share/ca-certificates/9router-mitm-root.crt"
+const systemCAPath187 = "/usr/local/share/ca-certificates/9router-mitm-root.crt"
 
-func neutralizeEnv(t *testing.T) {
+func neutralizeEnv187(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
@@ -34,13 +34,13 @@ func neutralizeEnv(t *testing.T) {
 	t.Setenv("NO_INSTALL_CA", "1")
 }
 
-func guardSystem(t *testing.T) {
+func guardSystem187(t *testing.T) {
 	t.Helper()
 	hostsBefore, err := os.ReadFile("/etc/hosts")
 	if err != nil {
 		t.Fatalf("read /etc/hosts: %v", err)
 	}
-	caBefore, caErr := os.ReadFile(systemCAPath)
+	caBefore, caErr := os.ReadFile(systemCAPath187)
 	t.Cleanup(func() {
 		hostsAfter, err := os.ReadFile("/etc/hosts")
 		if err != nil {
@@ -50,7 +50,7 @@ func guardSystem(t *testing.T) {
 		if !bytes.Equal(hostsBefore, hostsAfter) {
 			t.Error("/etc/hosts changed; MITM tests must not install DNS redirects")
 		}
-		caAfter, caErr2 := os.ReadFile(systemCAPath)
+		caAfter, caErr2 := os.ReadFile(systemCAPath187)
 		beforeMissing := os.IsNotExist(caErr)
 		afterMissing := os.IsNotExist(caErr2)
 		if beforeMissing && afterMissing {
@@ -62,7 +62,7 @@ func guardSystem(t *testing.T) {
 	})
 }
 
-type mitmRig struct {
+type mitmRig187 struct {
 	dir  string
 	srv  *Server
 	addr string
@@ -70,10 +70,10 @@ type mitmRig struct {
 	key  crypto.PrivateKey
 }
 
-func newRig(t *testing.T) *mitmRig {
+func newRig187(t *testing.T) *mitmRig187 {
 	t.Helper()
-	neutralizeEnv(t)
-	guardSystem(t)
+	neutralizeEnv187(t)
+	guardSystem187(t)
 	if !strings.HasSuffix(os.Args[0], ".test") {
 		t.Fatal("refusing to start MITM rig: test binary name does not end in .test")
 	}
@@ -86,7 +86,7 @@ func newRig(t *testing.T) *mitmRig {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", leafTLSConfig(dir, ca, key))
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", leafTLSConfig187(dir, ca, key))
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -96,10 +96,10 @@ func newRig(t *testing.T) *mitmRig {
 	srv.mu.Unlock()
 	go srv.acceptLoop()
 	t.Cleanup(func() { srv.Stop() })
-	return &mitmRig{dir: dir, srv: srv, addr: ln.Addr().String(), ca: ca, key: key}
+	return &mitmRig187{dir: dir, srv: srv, addr: ln.Addr().String(), ca: ca, key: key}
 }
 
-func leafTLSConfig(baseDir string, caCert *x509.Certificate, caKey crypto.PrivateKey) *tls.Config {
+func leafTLSConfig187(baseDir string, caCert *x509.Certificate, caKey crypto.PrivateKey) *tls.Config {
 	return &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if getHandler(hello.ServerName) == nil {
@@ -118,7 +118,7 @@ func leafTLSConfig(baseDir string, caCert *x509.Certificate, caKey crypto.Privat
 	}
 }
 
-func (r *mitmRig) dial(t *testing.T, serverName string, timeout time.Duration) (*tls.Conn, error) {
+func (r *mitmRig187) dial(t *testing.T, serverName string, timeout time.Duration) (*tls.Conn, error) {
 	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(r.ca)
@@ -129,7 +129,7 @@ func (r *mitmRig) dial(t *testing.T, serverName string, timeout time.Duration) (
 	})
 }
 
-func (r *mitmRig) exchange(t *testing.T, serverName, hostHeader, path string, body []byte, timeout time.Duration) (int, http.Header, []byte, error) {
+func (r *mitmRig187) exchange(t *testing.T, serverName, hostHeader, path string, body []byte, timeout time.Duration) (int, http.Header, []byte, error) {
 	t.Helper()
 	conn, err := r.dial(t, serverName, timeout)
 	if err != nil {
@@ -165,10 +165,10 @@ func closeIdleDefaultConns() {
 	}
 }
 
-func listenRouter(t *testing.T) []net.Listener {
+func listenRouter187(t *testing.T) []net.Listener {
 	t.Helper()
-	routerPortMu.Lock()
-	t.Cleanup(func() { routerPortMu.Unlock() })
+	routerPortMu187.Lock()
+	t.Cleanup(func() { routerPortMu187.Unlock() })
 	var listeners []net.Listener
 	for _, addr := range []string{"127.0.0.1:20130", "[::1]:20130"} {
 		ln, err := net.Listen("tcp", addr)
@@ -189,7 +189,7 @@ func listenRouter(t *testing.T) []net.Listener {
 	return listeners
 }
 
-func serveTruncated(ln net.Listener) {
+func serveTruncated187(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {

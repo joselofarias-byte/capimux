@@ -17,14 +17,14 @@ import (
 	"9router/proxy/internal/mitm/handlers"
 )
 
-// TestInterceptTLS_TruncatedUpstreamBody was ported from
+// TestInterceptTLS_TruncatedUpstreamBody187 was ported from
 // cursor/mitm-intercept-coverage-65e0. The skip that documented the bug is
 // now a hard failure: the intercepted client must see HTTP 502 mitm_error.
-func TestInterceptTLS_TruncatedUpstreamBody(t *testing.T) {
-	rig := newRig(t)
-	listeners := listenRouter(t)
+func TestInterceptTLS_TruncatedUpstreamBody187(t *testing.T) {
+	rig := newRig187(t)
+	listeners := listenRouter187(t)
 	for _, ln := range listeners {
-		go serveTruncated(ln)
+		go serveTruncated187(ln)
 	}
 
 	status, _, body, err := rig.exchange(t, "api.cursor.com", "api.cursor.com", "/v1/chat/completions", []byte(`{"model":"m"}`), 5*time.Second)
@@ -41,8 +41,8 @@ func TestInterceptTLS_TruncatedUpstreamBody(t *testing.T) {
 
 func TestInterceptTLS_CompleteJSONBody(t *testing.T) {
 	const payload = `{"id":"resp-1","ok":true}`
-	rig := newRig(t)
-	listeners := listenRouter(t)
+	rig := newRig187(t)
+	listeners := listenRouter187(t)
 	for _, ln := range listeners {
 		go serveFixed(ln, payload)
 	}
@@ -57,8 +57,8 @@ func TestInterceptTLS_CompleteJSONBody(t *testing.T) {
 }
 
 func TestHandleCursor_TruncatedUpstreamAfterHeaderAborts(t *testing.T) {
-	neutralizeEnv(t)
-	guardSystem(t)
+	neutralizeEnv187(t)
+	guardSystem187(t)
 	log.ClearConsoleLogs()
 	prev := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {

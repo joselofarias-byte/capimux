@@ -9,39 +9,39 @@ import (
 	"testing"
 )
 
-func useTransport(t *testing.T, rt http.RoundTripper) {
+func useTransport187(t *testing.T, rt http.RoundTripper) {
 	t.Helper()
 	prev := http.DefaultTransport
 	http.DefaultTransport = rt
 	t.Cleanup(func() { http.DefaultTransport = prev })
 }
 
-func withProxyBase(t *testing.T, base string) {
+func withProxyBase187(t *testing.T, base string) {
 	t.Helper()
 	prev := proxyBase
 	proxyBase = base
 	t.Cleanup(func() { proxyBase = prev })
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
+type roundTripFunc187 func(*http.Request) (*http.Response, error)
 
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func (f roundTripFunc187) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-type statusRecorder struct {
+type statusRecorder187 struct {
 	header http.Header
 	code   int
 	wrote  bool
 	body   bytes.Buffer
 }
 
-func (s *statusRecorder) Header() http.Header {
+func (s *statusRecorder187) Header() http.Header {
 	if s.header == nil {
 		s.header = make(http.Header)
 	}
 	return s.header
 }
 
-func (s *statusRecorder) WriteHeader(code int) {
+func (s *statusRecorder187) WriteHeader(code int) {
 	if s.wrote {
 		return
 	}
@@ -49,20 +49,20 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.code = code
 }
 
-func (s *statusRecorder) Write(p []byte) (int, error) {
+func (s *statusRecorder187) Write(p []byte) (int, error) {
 	if !s.wrote {
 		s.WriteHeader(http.StatusOK)
 	}
 	return s.body.Write(p)
 }
 
-type errAfter struct {
+type errAfter187 struct {
 	n   int
 	did int
 	err error
 }
 
-func (e *errAfter) Read(p []byte) (int, error) {
+func (e *errAfter187) Read(p []byte) (int, error) {
 	if e.did >= e.n {
 		return 0, e.err
 	}
@@ -83,20 +83,20 @@ func truncatedRoundTrip(r *http.Request) (*http.Response, error) {
 		StatusCode:    http.StatusOK,
 		Header:        header,
 		ContentLength: 64,
-		Body:          io.NopCloser(&errAfter{n: 4, err: io.ErrUnexpectedEOF}),
+		Body:          io.NopCloser(&errAfter187{n: 4, err: io.ErrUnexpectedEOF}),
 		Request:       r,
 	}, nil
 }
 
 const wantTruncatedJSON = `{"error":{"message":"upstream response truncated","type":"mitm_error","code":502}}`
 
-// TestHandleCursor_TruncatedUpstreamBody was ported from
+// TestHandleCursor_TruncatedUpstreamBody187 was ported from
 // cursor/mitm-intercept-coverage-65e0. The skip that documented the bug is
 // now a hard failure: a short upstream read must be HTTP 502 mitm_error.
-func TestHandleCursor_TruncatedUpstreamBody(t *testing.T) {
-	useTransport(t, roundTripFunc(truncatedRoundTrip))
-	withProxyBase(t, "http://router.test")
-	rec := &statusRecorder{}
+func TestHandleCursor_TruncatedUpstreamBody187(t *testing.T) {
+	useTransport187(t, roundTripFunc187(truncatedRoundTrip))
+	withProxyBase187(t, "http://router.test")
+	rec := &statusRecorder187{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	HandleCursor(rec, req, []byte(`{"model":"m"}`))
 	if !rec.wrote || rec.code != http.StatusBadGateway || !bytes.Contains(rec.body.Bytes(), []byte(`"type":"mitm_error"`)) {
@@ -121,9 +121,9 @@ func TestHandle_TruncatedUpstreamBody(t *testing.T) {
 	}
 	for _, tt := range handlers {
 		t.Run(tt.name, func(t *testing.T) {
-			useTransport(t, roundTripFunc(truncatedRoundTrip))
-			withProxyBase(t, "http://router.test")
-			rec := &statusRecorder{}
+			useTransport187(t, roundTripFunc187(truncatedRoundTrip))
+			withProxyBase187(t, "http://router.test")
+			rec := &statusRecorder187{}
 			req := httptest.NewRequest(http.MethodPost, tt.target, nil)
 			req.Header.Set("Authorization", "Bearer super-secret-token-value")
 			tt.fn(rec, req, []byte(`{"model":"m","password":"p@ss-not-a-key"}`))
@@ -146,7 +146,7 @@ func TestHandle_CompleteJSONBodyUnchanged(t *testing.T) {
 		_, _ = io.WriteString(w, payload)
 	}))
 	t.Cleanup(srv.Close)
-	withProxyBase(t, srv.URL)
+	withProxyBase187(t, srv.URL)
 
 	handlers := []struct {
 		name   string
@@ -161,7 +161,7 @@ func TestHandle_CompleteJSONBodyUnchanged(t *testing.T) {
 	}
 	for _, tt := range handlers {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := &statusRecorder{}
+			rec := &statusRecorder187{}
 			req := httptest.NewRequest(http.MethodPost, tt.target, nil)
 			tt.fn(rec, req, []byte(`{"model":"m"}`))
 			if rec.code != http.StatusOK || rec.body.String() != payload {
@@ -178,8 +178,8 @@ func TestHandle_CompleteJSONBodyUnchanged(t *testing.T) {
 			_, _ = w.Write([]byte(denied))
 		}))
 		t.Cleanup(upstream.Close)
-		withProxyBase(t, upstream.URL)
-		rec := &statusRecorder{}
+		withProxyBase187(t, upstream.URL)
+		rec := &statusRecorder187{}
 		HandleCursor(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), []byte(`{"model":"m"}`))
 		if rec.code != http.StatusServiceUnavailable || rec.body.String() != denied {
 			t.Fatalf("status %d body %q", rec.code, rec.body.String())
