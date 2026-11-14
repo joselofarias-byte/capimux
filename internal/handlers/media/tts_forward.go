@@ -213,13 +213,23 @@ func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, 
 		if errText == "" {
 			errText = resp.Status
 		}
-		log.Warn("media", "nvidia tts upstream error", "status", resp.StatusCode, "body", errText)
+		log.Warn("media", "nvidia tts upstream error",
+			"status", resp.StatusCode,
+			"provider", modelInfo.Provider,
+			"model", modelInfo.Model,
+			"body", sanitizeNvidiaTTSClientDetail(errText, targetURL, apiKey),
+		)
 		if h.Repo != nil {
 			backoff := h.Repo.GetConnectionBackoffLevel(conn.ID)
 			if classification := providers.ClassifyError(resp.StatusCode, errText, backoff); classification.ShouldFallback {
 				cooldownSec := max(classification.CooldownMs/1000, 1)
 				_ = h.Repo.LockConnectionModel(conn.ID, modelInfo.Model, cooldownSec, classification.NewBackoffLevel)
-				return resp.StatusCode, errText, true
+				// done=true still stops the account loop. forwardNvidiaTTS
+				// treats done as "the client already has a body", so the JSON
+				// error is written here. The status stays the upstream code.
+				msg := nvidiaTTSUpstreamClientMessage(resp.StatusCode, errText, targetURL, apiKey)
+				handlerutil.WriteJSONError(w, resp.StatusCode, msg)
+				return resp.StatusCode, msg, true
 			}
 		}
 		return resp.StatusCode, errText, false
@@ -227,7 +237,16 @@ func (h *MediaHandler) tryNvidiaTTSConn(w http.ResponseWriter, r *http.Request, 
 
 	audioBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return http.StatusBadGateway, "failed to read nvidia audio response", true
+		// done=true stops the loop. Write the 502 first, with the same message
+		// this return already used, so the client does not see an empty 200.
+		log.Error("media", "failed to read nvidia audio response",
+			"provider", modelInfo.Provider,
+			"model", modelInfo.Model,
+			"error", sanitizeNvidiaTTSClientDetail(err.Error(), targetURL, apiKey),
+		)
+		const readMsg = "failed to read nvidia audio response"
+		handlerutil.WriteJSONError(w, http.StatusBadGateway, readMsg)
+		return http.StatusBadGateway, readMsg, true
 	}
 
 	if h.Repo != nil {
