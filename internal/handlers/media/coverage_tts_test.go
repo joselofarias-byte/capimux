@@ -249,9 +249,6 @@ func TestNvidiaTTSTransportFailureIsSilent(t *testing.T) {
 	h := newTestMediaHandler(db.NewRepo(database))
 	rec := httptest.NewRecorder()
 	h.HandleAudioSpeech(rec, httptest.NewRequest(http.MethodPost, "/v1/audio/speech", strings.NewReader(`{"model":"nvidia/fastpitch/alloy","input":"hello"}`)))
-	if rec.Code == http.StatusOK && rec.Body.Len() == 0 {
-		t.Skip("bug tts_forward.go:197 and tts_forward.go:146: tryNvidiaTTSConn returns done=true on a transport error without writing, and forwardNvidiaTTS returns immediately. Reproduction: POST /v1/audio/speech {\"model\":\"nvidia/fastpitch/alloy\",\"input\":\"hello\"} with the nvidia connection baseUrl on a closed 127.0.0.1 port. The client sees 200 and an empty body instead of 502.")
-	}
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}

@@ -310,10 +310,9 @@ func TestHandleCursor_TruncatedUpstreamBody(t *testing.T) {
 	rec := &statusRecorder{}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	HandleCursor(rec, req, []byte(`{"model":"m"}`))
-	if rec.wrote && rec.code == http.StatusBadGateway && bytes.Contains(rec.body.Bytes(), []byte(`"type":"mitm_error"`)) {
-		return
+	if !rec.wrote || rec.code != http.StatusBadGateway || !bytes.Contains(rec.body.Bytes(), []byte(`"type":"mitm_error"`)) {
+		t.Fatalf("truncated upstream: wroteHeader=%v status=%d body=%q", rec.wrote, rec.code, rec.body.String())
 	}
-	t.Skipf("BUG internal/mitm/handlers/base.go:67-70 PipeJSON returns the short-read error, and internal/mitm/handlers/cursor.go:37 discards it (same at codex.go:37, copilot.go:37, kiro.go:150, antigravity.go:65). input: in-memory RoundTripper returns HTTP 200 application/json Content-Length 64 and then io.ErrUnexpectedEOF after 4 bytes. expected: HTTP 502 JSON mitm_error. actual: wroteHeader=%v status=%d body=%q", rec.wrote, rec.code, rec.body.String())
 }
 
 func TestHandle_ModelPrefixAndNestedAntigravity(t *testing.T) {

@@ -286,7 +286,7 @@ func TestProxyPoolReadUpdateAndLocalTest(t *testing.T) {
 	}
 	strict := put(`{"strictProxy":false}`)
 	if strict.Code != http.StatusForbidden {
-		t.Skipf("Pregunta para José Luis: proxypools.go:154 esperaba fail-closed 403 al bajar strictProxy sin credencial de admin; obtuvo %d %s", strict.Code, strict.Body.String())
+		t.Fatalf("bajar strictProxy sin admin: status %d body %s", strict.Code, strict.Body.String())
 	}
 	if !strings.Contains(strict.Body.String(), "strictProxy") {
 		t.Fatalf("403 should name strictProxy: %s", strict.Body.String())

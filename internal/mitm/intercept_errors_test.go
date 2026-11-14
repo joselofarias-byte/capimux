@@ -113,7 +113,7 @@ func TestInterceptTLS_TruncatedUpstreamBody(t *testing.T) {
 
 	status, _, body, err := rig.exchange(t, "api.cursor.com", "api.cursor.com", "/v1/chat/completions", []byte(`{"model":"m"}`), 5*time.Second)
 	if err != nil || status != http.StatusBadGateway || !bytes.Contains(body, []byte(`"type":"mitm_error"`)) {
-		t.Skipf("BUG internal/mitm/handlers/base.go:67-70 PipeJSON returns the short-read error, and internal/mitm/handlers/cursor.go:37 discards it (same at codex.go:37, copilot.go:37, kiro.go:150, antigravity.go:65). input: TLS POST api.cursor.com {\"model\":\"m\"}; upstream writes HTTP 200 Content-Type application/json Content-Length 64 then closes after {\"x\":. expected: HTTP 502 JSON mitm_error. actual: client err=%v status=%d body=%q", err, status, body)
+		t.Fatalf("truncated upstream: err=%v status=%d body=%q", err, status, body)
 	}
 }
 

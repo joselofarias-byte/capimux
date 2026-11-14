@@ -58,6 +58,7 @@ func SchemaStatements() []string {
 			updatedAt TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS usageHistory (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			timestamp TEXT,
 			provider TEXT,
 			model TEXT,
@@ -83,6 +84,18 @@ func SchemaStatements() []string {
 			connectionId TEXT,
 			status TEXT,
 			data TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS _meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS proxyPools (
+			id TEXT PRIMARY KEY,
+			isActive INTEGER DEFAULT 1,
+			testStatus TEXT,
+			data TEXT NOT NULL,
+			createdAt TEXT NOT NULL,
+			updatedAt TEXT NOT NULL
 		)`,
 	}
 }

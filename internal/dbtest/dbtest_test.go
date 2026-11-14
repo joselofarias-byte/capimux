@@ -22,6 +22,8 @@ func TestSchemaStatements(t *testing.T) {
 		"usageHistory",
 		"usageDaily",
 		"requestDetails",
+		"_meta",
+		"proxyPools",
 	}
 	if len(stmts) != len(want) {
 		t.Fatalf("SchemaStatements() len = %d, want %d", len(stmts), len(want))
@@ -109,17 +111,9 @@ func TestCreateTablesClosedDB(t *testing.T) {
 	}
 }
 
-// TestCreateTablesMatchesCoreSchema records that the fixture does not match
-// the schema EnsureCoreSchema builds for a real database.
-//
-// Reproduction: build one database with CreateTables and another with
-// EnsureCoreSchema, then compare sqlite table and column names.
-// internal/dbtest/dbtest.go:12-88 omits _meta and proxyPools (declared in
-// internal/db/schema.go:32-86) and omits usageHistory.id (schema.go:128-131).
-// Removing the skip fails this test. Production code is unchanged.
+// TestCreateTablesMatchesCoreSchema fails when CreateTables omits a table or
+// column that EnsureCoreSchema creates. The comparison is by name.
 func TestCreateTablesMatchesCoreSchema(t *testing.T) {
-	t.Skip("bug: dbtest.SchemaStatements is missing _meta, proxyPools and usageHistory.id that db.EnsureCoreSchema creates; see dbtest.go:12-88 and schema.go:32-86,128-131")
-
 	fixture := openTempDB(t)
 	if err := CreateTables(fixture); err != nil {
 		t.Fatalf("CreateTables: %v", err)
