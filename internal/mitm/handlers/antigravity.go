@@ -59,9 +59,5 @@ func HandleAntigravity(w http.ResponseWriter, r *http.Request, body []byte) {
 	}
 	defer upstream.Body.Close()
 
-	if isStream || upstream.Header.Get("Content-Type") == "text/event-stream" {
-		PipeSSE(upstream, w)
-	} else {
-		PipeJSON(upstream, w)
-	}
+	pipeUpstream(w, upstream, isStream || upstream.Header.Get("Content-Type") == "text/event-stream")
 }
