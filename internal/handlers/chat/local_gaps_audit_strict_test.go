@@ -41,7 +41,7 @@ func TestUsageLogRecordsResolvedModel(t *testing.T) {
 		t.Fatalf("usage row: %v", err)
 	}
 	if provider != "deepseek" || model != "deepseek-chat" {
-		t.Skipf("Pregunta para José Luis: internal/handlers/chat/fallback.go:594-606 registra provider=%q model=%q. Esperado: el proveedor y el modelo reales resueltos (deepseek / deepseek-chat), que es lo que se envió upstream. Actual: usageHistory guardó provider=%q model=%q para un alias fast-model.", provider, model, provider, model)
+		t.Fatalf("usageHistory provider=%q model=%q, want deepseek / deepseek-chat", provider, model)
 	}
 
 	var detailModel string
@@ -49,7 +49,7 @@ func TestUsageLogRecordsResolvedModel(t *testing.T) {
 		t.Fatalf("request detail: %v", err)
 	}
 	if detailModel != "deepseek-chat" {
-		t.Skipf("Pregunta para José Luis: internal/handlers/chat/usage.go:289 requestDetails.model=%q. Esperado: deepseek-chat. Actual: %q.", detailModel, detailModel)
+		t.Fatalf("requestDetails.model=%q, want deepseek-chat", detailModel)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestStrictHTTPProxyIgnoresNoProxy(t *testing.T) {
 		resp.Body.Close()
 	}
 	if directHits.Load() != 0 || proxyHits.Load() == 0 {
-		t.Skipf("Pregunta para José Luis: internal/handlers/chat/connections_proxy.go:125-129 con strictProxy y noProxy=127.0.0.1,localhost. Esperado: fail-closed, el destino local y noProxy no anulan el proxy (proxyHits>0, directHits=0). Actual: proxyHits=%d directHits=%d err=%v.", proxyHits.Load(), directHits.Load(), err)
+		t.Fatalf("strictProxy+noProxy: proxyHits=%d directHits=%d err=%v", proxyHits.Load(), directHits.Load(), err)
 	}
 }
 
