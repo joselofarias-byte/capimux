@@ -25,10 +25,10 @@ func relayPoisonErr() error {
 	return errors.New("read http://user:" + relayUserinfo + "@127.0.0.1/v1?api_key=" + relayQuery + " Authorization: Bearer " + relayHeader)
 }
 
-type errReadCloser struct{ err error }
+type errReadCloser197 struct{ err error }
 
-func (e errReadCloser) Read([]byte) (int, error) { return 0, e.err }
-func (e errReadCloser) Close() error             { return nil }
+func (e errReadCloser197) Read([]byte) (int, error) { return 0, e.err }
+func (e errReadCloser197) Close() error             { return nil }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -156,7 +156,7 @@ func TestChatTranscriptionReadErrorReturnsJSON(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Api-Key": []string{relayHeader}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	})}}
@@ -206,7 +206,7 @@ func TestChatVideoGetReadErrorReturnsJSON(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"X-Api-Key": []string{relayHeader}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	})}}
@@ -249,7 +249,7 @@ func TestChatAudioVoicesReadErrorReturnsJSON(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"X-Api-Key": []string{relayHeader}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	})}}
@@ -299,7 +299,7 @@ func TestMimoFreeReadErrorReturnsJSONAndStops(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Api-Key": []string{relayHeader}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	})}}
@@ -348,7 +348,7 @@ func TestStreamReadErrorStaysCommitted200(t *testing.T) {
 	h := &ChatHandler{}
 	rec := httptest.NewRecorder()
 	cw := newCommittedResponseWriter(rec)
-	err := h.handleStreamResponse(context.Background(), cw, errReadCloser{err: errors.New("stream body closed")}, false, time.Now(), &streamMetrics{})
+	err := h.handleStreamResponse(context.Background(), cw, errReadCloser197{err: errors.New("stream body closed")}, false, time.Now(), &streamMetrics{})
 	if err == nil {
 		t.Fatal("expected read error")
 	}
@@ -364,7 +364,7 @@ func TestGeminiStreamReadErrorStaysCommitted200(t *testing.T) {
 	h := &ChatHandler{}
 	rec := httptest.NewRecorder()
 	cw := newCommittedResponseWriter(rec)
-	err := h.handleGeminiStream(context.Background(), cw, errReadCloser{err: errors.New("gemini body closed")}, false, &streamMetrics{})
+	err := h.handleGeminiStream(context.Background(), cw, errReadCloser197{err: errors.New("gemini body closed")}, false, &streamMetrics{})
 	if err == nil {
 		t.Fatal("expected read error")
 	}

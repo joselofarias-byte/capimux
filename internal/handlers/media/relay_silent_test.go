@@ -25,14 +25,14 @@ func relayPoisonErr() error {
 	return errors.New("read http://user:" + relayUserinfo + "@127.0.0.1/v1?api_key=" + relayQuery + " Authorization: Bearer " + relayHeader)
 }
 
-type errReadCloser struct{ err error }
+type errReadCloser197 struct{ err error }
 
-func (e errReadCloser) Read([]byte) (int, error) { return 0, e.err }
-func (e errReadCloser) Close() error             { return nil }
+func (e errReadCloser197) Read([]byte) (int, error) { return 0, e.err }
+func (e errReadCloser197) Close() error             { return nil }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
+type roundTripFunc197 func(*http.Request) (*http.Response, error)
 
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func (f roundTripFunc197) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func assertNoRelayFixture(t *testing.T, body string) {
 	t.Helper()
@@ -55,7 +55,7 @@ func assertLogsHideFixture(t *testing.T) {
 	}
 }
 
-func assertBadGateway(t *testing.T, rec *httptest.ResponseRecorder) {
+func assertBadGateway197(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d, bytes %d", rec.Code, rec.Body.Len())
@@ -127,7 +127,7 @@ func TestEmbeddingsReadErrorReturnsJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{"model":"openai/text-embedding-ada-002","input":"hi"}`))
 	handler.HandleEmbeddings(rec, req)
-	assertBadGateway(t, rec)
+	assertBadGateway197(t, rec)
 }
 
 func TestEmbeddingsEmpty2xxStays200(t *testing.T) {
@@ -238,7 +238,7 @@ func TestSystemoneReadErrorReturnsJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/systemone", strings.NewReader(`{"model":"oc/jev-1.13-free","state":"ok","questions":{}}`))
 	handler.HandleSystemone(rec, req)
-	assertBadGateway(t, rec)
+	assertBadGateway197(t, rec)
 }
 
 func TestSystemoneSuccessKeepsBody(t *testing.T) {
@@ -309,11 +309,11 @@ func newHeadroom(repo *db.Repo, rt http.RoundTripper) *HeadroomHandler {
 func TestHeadroomReadErrorReturnsJSON(t *testing.T) {
 	database, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()
-	handler := newHeadroom(db.NewRepo(database), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	handler := newHeadroom(db.NewRepo(database), roundTripFunc197(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"X-Api-Key": []string{relayHeader}, "Content-Type": []string{"text/plain"}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	}))
@@ -321,13 +321,13 @@ func TestHeadroomReadErrorReturnsJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/headroom/proxy/status", nil)
 	handler.HandleHeadroomProxy(rec, req)
-	assertBadGateway(t, rec)
+	assertBadGateway197(t, rec)
 }
 
 func TestHeadroomSuccessKeepsBody(t *testing.T) {
 	database, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()
-	handler := newHeadroom(db.NewRepo(database), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	handler := newHeadroom(db.NewRepo(database), roundTripFunc197(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/plain"}, "X-Request-Id": []string{"hr-1"}},
@@ -353,11 +353,11 @@ func TestHeadroomSuccessKeepsBody(t *testing.T) {
 func TestHeadroomDashboardReadErrorIsNotSilent(t *testing.T) {
 	database, cleanup := setupEmbeddingsTestDB(t)
 	defer cleanup()
-	handler := newHeadroom(db.NewRepo(database), roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	handler := newHeadroom(db.NewRepo(database), roundTripFunc197(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/html"}},
-			Body:       errReadCloser{err: errors.New("dashboard read failed")},
+			Body:       errReadCloser197{err: errors.New("dashboard read failed")},
 			Request:    r,
 		}, nil
 	}))
@@ -399,12 +399,12 @@ func TestMinimaxVoiceReadErrorReturnsJSON(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	handler := newTestMediaHandler(repo)
-	handler.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	handler.Client = &http.Client{Transport: roundTripFunc197(func(r *http.Request) (*http.Response, error) {
 		hits++
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}, "X-Api-Key": []string{relayHeader}},
-			Body:       errReadCloser{err: relayPoisonErr()},
+			Body:       errReadCloser197{err: relayPoisonErr()},
 			Request:    r,
 		}, nil
 	})}
@@ -412,7 +412,7 @@ func TestMinimaxVoiceReadErrorReturnsJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/media-providers/tts/voices?provider=minimax", nil)
 	handler.HandleAudioVoices(rec, req)
-	assertBadGateway(t, rec)
+	assertBadGateway197(t, rec)
 	if hits != 1 {
 		t.Fatalf("upstream calls %d", hits)
 	}
@@ -428,7 +428,7 @@ func TestMinimaxVoiceSuccessKeepsVoice(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	handler := newTestMediaHandler(repo)
-	handler.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	handler.Client = &http.Client{Transport: roundTripFunc197(func(r *http.Request) (*http.Response, error) {
 		body := `{"base_resp":{"status_code":0},"system_voice":[{"voice_id":"English_Calm","voice_name":"Calm"}]}`
 		return &http.Response{
 			StatusCode: http.StatusOK,
