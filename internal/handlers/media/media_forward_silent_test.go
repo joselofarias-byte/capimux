@@ -68,7 +68,7 @@ func capturedLogs() string {
 	return strings.Join(log.ConsoleLogs(), "\n")
 }
 
-func assertNoLeak(t *testing.T, label, text string) {
+func assertNoLeak196(t *testing.T, label, text string) {
 	t.Helper()
 	for _, secret := range leakSecrets() {
 		if secret != "" && strings.Contains(text, secret) {
@@ -144,7 +144,7 @@ func assertBadGateway(t *testing.T, rec *httptest.ResponseRecorder) string {
 	if env.Error.Message == "" {
 		t.Fatal("mensaje vacío")
 	}
-	assertNoLeak(t, "cuerpo", rec.Body.String())
+	assertNoLeak196(t, "cuerpo", rec.Body.String())
 	return env.Error.Message
 }
 
@@ -166,13 +166,13 @@ func handlerWithTransport(t *testing.T, database *sql.DB, rt http.RoundTripper) 
 
 func TestMediaSafeTextDropsURLSecrets(t *testing.T) {
 	raw := "dial " + poisonousBase(false) + " Authorization: Bearer " + leakKey + " X-Api-Key: " + leakKey + " Cookie: session=" + leakCookie
-	assertNoLeak(t, "texto", mediaSafeText(raw))
+	assertNoLeak196(t, "texto", mediaSafeText(raw))
 
 	_, err := http.NewRequest(http.MethodPost, poisonousBase(true)+"/v1/images/generations", nil)
 	if err == nil {
 		t.Fatal("la URL inválida debía fallar al armar el request")
 	}
-	assertNoLeak(t, "error de parseo", mediaSafeErr(err))
+	assertNoLeak196(t, "error de parseo", mediaSafeErr(err))
 	if mediaSafeURL(poisonousBase(false)) != "http://media-forward.invalid/v1" {
 		t.Fatal("la URL logueada conservó userinfo o query")
 	}
@@ -193,7 +193,7 @@ func TestMediaForwardCreateErrorReturnsJSON(t *testing.T) {
 		t.Fatalf("mensaje inesperado, len=%d", len(msg))
 	}
 	logs := capturedLogs()
-	assertNoLeak(t, "log", logs)
+	assertNoLeak196(t, "log", logs)
 	if !strings.Contains(logs, "provider=openai") || !strings.Contains(logs, "model=dall-e-3") {
 		t.Fatal("el log no nombra el proveedor y el modelo resueltos")
 	}
@@ -218,7 +218,7 @@ func TestMediaForwardTransportErrorReturnsJSON(t *testing.T) {
 		t.Fatal("el transporte falso no recibió el request")
 	}
 	logs := capturedLogs()
-	assertNoLeak(t, "log", logs)
+	assertNoLeak196(t, "log", logs)
 	if !strings.Contains(logs, "provider=openai") || !strings.Contains(logs, "model=dall-e-3") {
 		t.Fatal("el log no nombra el proveedor y el modelo resueltos")
 	}
@@ -248,7 +248,7 @@ func TestMediaForwardReadErrorReturnsJSON(t *testing.T) {
 		t.Fatalf("mensaje inesperado, len=%d", len(msg))
 	}
 	logs := capturedLogs()
-	assertNoLeak(t, "log", logs)
+	assertNoLeak196(t, "log", logs)
 	if !strings.Contains(logs, "provider=openai") || !strings.Contains(logs, "model=dall-e-3") {
 		t.Fatal("el log no nombra el proveedor y el modelo resueltos")
 	}
@@ -309,9 +309,9 @@ func TestMediaForwardFallbackStatusStaysUpstream(t *testing.T) {
 	if strings.Contains(raw, "modelLock_") || strings.Contains(raw, "rateLimitedUntil") {
 		t.Fatal("el forwarder bloqueó la conexión")
 	}
-	assertNoLeak(t, "cuerpo", rec.Body.String())
+	assertNoLeak196(t, "cuerpo", rec.Body.String())
 	logs := capturedLogs()
-	assertNoLeak(t, "log", logs)
+	assertNoLeak196(t, "log", logs)
 	if !strings.Contains(logs, "provider=openai") || !strings.Contains(logs, "model=dall-e-3") {
 		t.Fatal("el log no nombra el proveedor y el modelo resueltos")
 	}
@@ -388,6 +388,6 @@ func TestMediaForwardSuccessWithSecretURLKeepsBody(t *testing.T) {
 	if gotModel != "dall-e-3" {
 		t.Fatal("el upstream no recibió el modelo resuelto")
 	}
-	assertNoLeak(t, "cuerpo", rec.Body.String())
-	assertNoLeak(t, "log", capturedLogs())
+	assertNoLeak196(t, "cuerpo", rec.Body.String())
+	assertNoLeak196(t, "log", capturedLogs())
 }
