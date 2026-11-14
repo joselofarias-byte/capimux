@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"9router/proxy/internal/config"
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
+	"9router/proxy/internal/deepseekweb"
 	"9router/proxy/internal/handlers/chat"
 	"9router/proxy/internal/handlers/dashboard"
 	"9router/proxy/internal/handlers/media"
@@ -451,6 +453,11 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		r.Post("/api/version/update", chatH.HandleTriggerUpdate)
 		r.Post("/api/version/auto-update", chatH.HandleToggleAutoUpdate)
 		r.Post("/api/version/shutdown", HandleShutdown)
+
+		// DeepSeek Web sessions for the opt-in DeepSeek profile. Credentials
+		// are admin-only: inference API keys get 401 here.
+		deepseekweb.SetDataDirResolver(config.ResolveDataDir)
+		deepseekweb.Routes(r, deepseekweb.Default)
 	})
 
 	// API-key protected domain routes

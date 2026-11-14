@@ -81,6 +81,15 @@ func dsProfileEnv(dshURL, infURL string) map[string]string {
 	}
 }
 
+// dsAllowFallback opens the InferX gate (panel toggle + connected web
+// session) for one test; production wiring keeps it closed by default.
+func dsAllowFallback(t *testing.T, allow bool) {
+	t.Helper()
+	prev := deepseekFallbackGate
+	deepseekFallbackGate = func() bool { return allow }
+	t.Cleanup(func() { deepseekFallbackGate = prev })
+}
+
 func dsPost(h *ChatHandler, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.HandleChatCompletions(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
@@ -208,6 +217,7 @@ func TestDeepSeekProfile_KnownUsageIsRecordedNormally(t *testing.T) {
 	dsh := newDSUpstream(t, dsJSON(`{"error":{"message":"busy"}}`, 503))
 	inf := newDSUpstream(t, dsJSON(dsKnownUsage, 200))
 	repo := dsRepo(t, regular.srv.URL)
+	dsAllowFallback(t, true)
 	h := NewChatHandler(repo)
 	h.SetDeepSeekProfileEnv(dsEnv(dsProfileEnv(dsh.srv.URL, inf.srv.URL)))
 
@@ -267,5 +277,27 @@ func TestDeepSeekProfile_FailureIsNotBilled(t *testing.T) {
 	}
 	if rows, _ := repo.GetRecentUsageHistory(10); len(rows) != 0 {
 		t.Fatalf("failed request billed: %+v", rows)
+	}
+}
+
+// With only env configuration (InferX key set) and no panel toggle/connected
+// DeepSeek Web session, the paid fallback must not be used.
+func TestDeepSeekProfile_InferXKeyAloneDoesNotEnableBillableFallback(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	regular := newDSUpstream(t, dsJSON(dsKnownUsage, 200))
+	dsh := newDSUpstream(t, dsJSON(`{"error":{"message":"busy"}}`, 503))
+	inf := newDSUpstream(t, dsJSON(dsKnownUsage, 200))
+	repo := dsRepo(t, regular.srv.URL)
+	h := NewChatHandler(repo)
+	h.SetDeepSeekProfileEnv(dsEnv(dsProfileEnv(dsh.srv.URL, inf.srv.URL)))
+	rec := dsPost(h, dsReq)
+	if rec.Code != 503 || inf.hits.Load() != 0 || dsh.hits.Load() != 1 {
+		t.Fatalf("got %d dsh=%d inferx=%d", rec.Code, dsh.hits.Load(), inf.hits.Load())
+	}
+	rows, _ := repo.GetRecentUsageHistory(10)
+	for _, r := range rows {
+		if r.Provider == deepseekprofile.ProviderInferX {
+			t.Fatal("InferX usage recorded without the gate")
+		}
 	}
 }
