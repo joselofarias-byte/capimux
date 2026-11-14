@@ -5,7 +5,10 @@ import (
 	json "encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"9router/proxy/internal/auth"
 )
 
 func TestApiKeysRevealForDashboardSession(t *testing.T) {
@@ -49,5 +52,47 @@ func TestApiKeysRevealForDashboardSession(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0]["key"] != full {
 		t.Fatalf("expected listed full key %q, got %v", full, listed)
+	}
+}
+
+func TestCreateInferenceOnlyClientApiKey(t *testing.T) {
+	repo, cleanup := setupTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	body := []byte(`{"name":"Chatbox personal","scope":"inference"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	// Main requires an admin session to mint client keys. The inference key
+	// itself is still generated only by the server.
+	asDashboardAdmin(t, req)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(created.Key, auth.InferenceOnlyKeyPrefix) {
+		t.Fatal("expected server-generated inference-only key prefix")
+	}
+
+	invalid := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader([]byte(`{"scope":"wrong"}`)))
+	asDashboardAdmin(t, invalid)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, invalid)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid scope status: %d", rec.Code)
+	}
+	manual := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader([]byte(`{"scope":"inference","key":"caller-chosen"}`)))
+	asDashboardAdmin(t, manual)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, manual)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("caller-chosen scoped key status: %d", rec.Code)
 	}
 }
