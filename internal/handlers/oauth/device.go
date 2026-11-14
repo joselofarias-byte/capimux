@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/providers"
 	"9router/proxy/internal/proxy"
 )
 
@@ -273,9 +274,11 @@ func kilocodeStart(ctx context.Context) (map[string]any, error) {
 	}, nil
 }
 
-// --- grok-cli: standard device flow, referrer=grok-build ---
-
-var grokcliUA = "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"
+// --- grok-cli: RFC 8628 device flow, still exposed by xAI OIDC.
+//
+// The official Grok client now defaults to browser PKCE, but xAI continues to
+// publish the device-code grant for headless clients. Keep our device path for
+// Android/Termux while presenting a current Grok CLI client identity.
 
 func grokcliStart(ctx context.Context) (map[string]any, error) {
 	form := url.Values{
@@ -283,7 +286,7 @@ func grokcliStart(ctx context.Context) (map[string]any, error) {
 		"scope":     {"openid profile email offline_access grok-cli:access api:access conversations:read conversations:write"},
 		"referrer":  {"grok-build"},
 	}
-	data, status, err := postForm(ctx, "https://auth.x.ai/oauth2/device/code", form, map[string]string{"User-Agent": grokcliUA})
+	data, status, err := postForm(ctx, "https://auth.x.ai/oauth2/device/code", form, map[string]string{"User-Agent": providers.GrokCLIUserAgent()})
 	if err != nil || status != http.StatusOK {
 		return nil, fmt.Errorf("grok CLI device code request failed: %v status=%d", err, status)
 	}
@@ -669,7 +672,7 @@ func grokcliPoll(ctx context.Context, code string) (deviceTokens, error) {
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"device_code": {code}, "client_id": {"b1a00492-073a-47ea-816f-4c329264a828"},
 	}
-	data, _, err := postForm(ctx, "https://auth.x.ai/oauth2/token", form, map[string]string{"User-Agent": grokcliUA})
+	data, _, err := postForm(ctx, "https://auth.x.ai/oauth2/token", form, map[string]string{"User-Agent": providers.GrokCLIUserAgent()})
 	if err != nil {
 		return t, fmt.Errorf("poll_failed: %v", err)
 	}
@@ -684,8 +687,7 @@ func grokcliPoll(ctx context.Context, code string) (deviceTokens, error) {
 		}
 		return t, fmt.Errorf("authorization_pending")
 	}
-	if ui, _, _ := getJSON(ctx, "https://cli-chat-proxy.grok.com/v1/user",
-		map[string]string{"Authorization": "Bearer " + t.access}); ui != nil {
+	if ui, _, _ := getJSON(ctx, "https://cli-chat-proxy.grok.com/v1/user", providers.GrokCLIProxyHeaders(t.access)); ui != nil {
 		t.email = strVal(ui, "email")
 		t.name = strVal(ui, "name", "username")
 	}

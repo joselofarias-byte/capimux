@@ -520,3 +520,92 @@ func TestHandleTestConnectionReadsRequestBody(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestGrokCLIProbeHeadersUseCurrentIdentity(t *testing.T) {
+	t.Setenv("GROK_CLI_CLIENT_VERSION", "1.2.3-test")
+	h := grokCLIProbeHeaders()
+	if h["x-grok-client-version"] != "1.2.3-test" {
+		t.Fatalf("client version = %q", h["x-grok-client-version"])
+	}
+	if h["x-grok-client-identifier"] != "grok-shell" {
+		t.Fatalf("client identifier = %q", h["x-grok-client-identifier"])
+	}
+	if h["X-XAI-Token-Auth"] != "xai-grok-cli" {
+		t.Fatalf("token auth = %q", h["X-XAI-Token-Auth"])
+	}
+	if h["x-authenticateresponse"] != "authenticate-response" {
+		t.Fatalf("authenticate response = %q", h["x-authenticateresponse"])
+	}
+	if h["x-grok-client-mode"] != "headless" {
+		t.Fatalf("client mode = %q", h["x-grok-client-mode"])
+	}
+	if h["Accept"] != "application/json" {
+		t.Fatalf("accept = %q", h["Accept"])
+	}
+}
+
+// TestGrokCLIProbeUsesProxyAwarePath locks the dashboard Grok probe to main's
+// probeHTTPClient. A configured proxy is the client the probe dials with, and
+// connectionNoProxy does not replace that client with a direct one.
+func TestGrokCLIProbeUsesProxyAwarePath(t *testing.T) {
+	h := &DashboardHandler{}
+	const proxyURL = "http://127.0.0.1:9"
+	data := connectionProbeData{
+		ConnectionProxyEnabled: true,
+		ConnectionProxyURL:     proxyURL,
+		ConnectionNoProxy:      "cli-chat-proxy.grok.com,localhost,127.0.0.1",
+	}
+	client, gotURL := h.probeHTTPClient(data, map[string]any{
+		"strictProxy": true,
+		"providerSpecificData": map[string]any{
+			"strictProxy": true,
+		},
+	})
+	if gotURL != proxyURL {
+		t.Fatalf("proxy URL = %q", gotURL)
+	}
+	if client == nil {
+		t.Fatal("grok probe client must be the proxy-bound client")
+	}
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("grok probe transport must carry the connection proxy")
+	}
+	req := httptest.NewRequest(http.MethodGet, grokCLIProbeURL, nil)
+	got, err := tr.Proxy(req)
+	if err != nil || got == nil || got.String() != proxyURL {
+		t.Fatalf("proxy for %s = %v err=%v", grokCLIProbeURL, got, err)
+	}
+	if grokCLIProbeHeaders()["x-grok-client-version"] == "" {
+		t.Fatal("grok probe identity headers must still be set on the proxy-aware path")
+	}
+}
+
+func TestTestConnection_GrokCLIProxyPrecheckFailure(t *testing.T) {
+	repo, cleanup := setupProbeTestDB(t)
+	defer cleanup()
+
+	payload := `{"accessToken":"tok","expiresAt":"2099-01-01T00:00:00Z","connectionProxyEnabled":true,"connectionProxyUrl":"http://127.0.0.1:1","connectionNoProxy":"cli-chat-proxy.grok.com,localhost,127.0.0.1"}`
+	if err := repo.CreateProviderConnectionFull("conn-grok-proxy", "grok-cli", "oauth", "Grok", nil, payload); err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	probed := false
+	original := connectionProbeDo
+	connectionProbeDo = func(_ context.Context, _ *http.Client, _, _ string, _ map[string]string, _ []byte) (int, []byte, error) {
+		probed = true
+		return http.StatusOK, nil, nil
+	}
+	t.Cleanup(func() { connectionProbeDo = original })
+
+	_, body := postTestConnection(t, repo, "conn-grok-proxy")
+	if body["valid"] != false {
+		t.Fatalf("expected proxy failure, got %v", body)
+	}
+	if probed {
+		t.Error("grok provider must not be probed when the proxy pre-check fails")
+	}
+	if msg, _ := body["error"].(string); !strings.HasPrefix(msg, "Proxy test failed") {
+		t.Errorf("error = %v", body["error"])
+	}
+}
