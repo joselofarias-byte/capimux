@@ -262,9 +262,11 @@ func (h *HeadroomHandler) HandleHeadroomProxy(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	copyProxyResponseHeaders(w, resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		copyProxyResponseHeaders(w, resp.Header)
+	}); err != nil {
+		return
+	}
 }
 
 func copyProxyResponseHeaders(w http.ResponseWriter, hdr http.Header) {

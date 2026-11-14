@@ -733,9 +733,11 @@ func (h *ChatHandler) HandleAudioVoices(w http.ResponseWriter, r *http.Request) 
 	}
 	defer resp.Body.Close()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		w.Header().Set("Content-Type", "application/json")
+	}); err != nil {
+		return
+	}
 }
 
 // HandleCountTokens estimates Anthropic-format token count.

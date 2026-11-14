@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Forwarders HTTP: un 2xx cuyo cuerpo no se puede leer ya no responde 200 vacío. Embeddings, systemone, el proxy de Headroom (salvo el HTML del dashboard), las voces de MiniMax y los forwarders de chat que aún copiaban el cuerpo después de `WriteHeader` (multimodal, transcripción, vídeo, voces y MiMo free no-stream) responden 502 JSON `failed to read upstream response` (`bad_gateway`) sin reenviar cabeceras del upstream. Un 2xx vacío de verdad sigue en 200. Un status distinto de 2xx se reenvía igual. Los streams SSE no cambian: las cabeceras salen antes del primer byte.
+
 - Capimux/JolufaSoft: comparador ampliado a diez modelos, seis tareas, perfiles locales sin contenido ni credenciales y estrategias explícitas de selección. Fallback conservador ante HTTP 429/5xx; no repetir timeouts ambiguos. API anterior compatible. Ver `docs/MULTIMODELO.md`.
 - Seguridad: port selectivo de upstream luqman-v1/9router-go#132 (`dcd3d342020521304c1a7319efa1fd43ee25a19a`): límites de lectura de cabeceras y conexiones inactivas; sin deadline global de escritura para preservar SSE. Pruebas de regresión de configuración y stream prolongado.
 - Entrega: binarios Linux AMD64/ARM64 reproducibles en dos compilaciones de la misma fuente/toolchain, SHA-256 y artefactos efímeros de PR; sin publicar releases ni modificar main.

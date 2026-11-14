@@ -128,9 +128,11 @@ func (h *MediaHandler) HandleEmbeddings(w http.ResponseWriter, r *http.Request) 
 	}
 	defer resp.Body.Close()
 
-	w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+	}); err != nil {
+		return
+	}
 
 	if resp.StatusCode == http.StatusOK {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)
@@ -299,11 +301,13 @@ func (h *MediaHandler) forwardSystemoneRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer resp.Body.Close()
-	for k, v := range resp.Header {
-		w.Header()[k] = v
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+	}); err != nil {
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
 	if resp.StatusCode == http.StatusOK && conn != nil {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)
 	}
