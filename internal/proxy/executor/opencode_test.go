@@ -132,6 +132,51 @@ func TestForwardOpencode_PropagatesUpstream503(t *testing.T) {
 	}
 }
 
+// Audit #131: an OpenCode 403 (e.g. endpoint moved or access revoked) must
+// surface as an upstream error, never as a false success to the client.
+func TestForwardOpencode_PropagatesUpstream403(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "json"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":{"message":"Forbidden: access denied"}}`))
+			}))
+			defer srv.Close()
+
+			rec := httptest.NewRecorder()
+			err := ForwardOpencode(rec, &Request{
+				Client:        srv.Client(),
+				Config:        &providers.ProviderConfig{BaseURL: srv.URL},
+				Body:          []byte(`{"model":"exo-free","messages":[{"role":"user","content":"hi"}]}`),
+				IsStream:      stream,
+				TranslateResp: false,
+			})
+			if err == nil {
+				t.Fatal("expected upstream 403 error")
+			}
+
+			var ue *proxy.UpstreamError
+			if !errors.As(err, &ue) {
+				t.Fatalf("expected *proxy.UpstreamError, got %T: %v", err, err)
+			}
+			if ue.StatusCode != http.StatusForbidden {
+				t.Fatalf("expected status 403, got %d", ue.StatusCode)
+			}
+			if !strings.Contains(string(ue.Body), "Forbidden: access denied") {
+				t.Fatalf("expected upstream error body to be preserved, got %s", string(ue.Body))
+			}
+			if rec.Body.Len() != 0 {
+				t.Fatalf("expected no client response before fallback, got %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestForwardOpencode_MuseSpark_EdgeRelay(t *testing.T) {
 	var gotTarget, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
