@@ -390,14 +390,24 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		return baseCfg, nil
 	}
 
-	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
+	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno).
+	//
+	// strictProxy (connection, providerSpecificData or pool) means the upstream
+	// must only be reached through the relay. In that case neither a noProxy
+	// match nor a loopback upstream may skip the relay: the request fails with
+	// an error instead of going out directly. This adds no implicit allowance
+	// for local or private destinations: the only explicit local path is a
+	// LocalOnly provider (handled above, loopback-only). Without strictProxy
+	// the previous behavior is unchanged (noProxy and loopback skip the relay).
 	if connData != nil {
 		var relayURL string
 		var noProxy string
+		strict := connectionStrictProxy(connData)
 
 		if connData.ProxyPoolID != "" {
-			if pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID); err == nil && pool != nil && pool.IsActive {
-				if pool.Type == "vercel" || pool.Type == "cloudflare" || pool.Type == "deno" {
+			if pool, err := h.Repo.GetProxyPool(connData.ProxyPoolID); err == nil && pool != nil {
+				strict = strict || pool.StrictProxy
+				if pool.IsActive && isEdgeRelayType(pool.Type) {
 					relayURL = pool.NextURL()
 					noProxy = pool.NoProxy
 					logProxyOnce(connData.ProxyPoolID, relayURL, pool.Type)
@@ -413,8 +423,17 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 			}
 		}
 
-		if relayURL != "" && !internalproxy.ShouldBypassNoProxy(baseCfg.BaseURL, noProxy) {
+		if relayURL != "" {
+			if internalproxy.ShouldBypassNoProxy(baseCfg.BaseURL, noProxy) {
+				if strict {
+					return nil, fmt.Errorf("strict proxy: provider %s upstream matches noProxy; refusing to bypass the edge relay", provider)
+				}
+				return baseCfg, nil
+			}
 			if providers.IsLoopbackURL(baseCfg.BaseURL) {
+				if strict {
+					return nil, fmt.Errorf("strict proxy: provider %s upstream is loopback; refusing to bypass the edge relay", provider)
+				}
 				log.Warn("routing", "skipping edge relay for loopback upstream", "provider", provider)
 				return baseCfg, nil
 			}

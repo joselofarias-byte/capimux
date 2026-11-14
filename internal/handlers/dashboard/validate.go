@@ -81,7 +81,7 @@ var validateProbeDo = func(ctx context.Context, method, rawURL string, headers m
 		client = c
 	}
 	resp, err := client.Do(req)
-	if isProxyFailure(err, resp) {
+	if isProxyFailure(err, resp) && !isStrictProbeClient(client) {
 		if resp != nil {
 			resp.Body.Close()
 		}
