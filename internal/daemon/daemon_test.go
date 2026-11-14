@@ -57,6 +57,11 @@ func TestChildArgsDropsBackgroundFlag(t *testing.T) {
 			in:   nil,
 			want: []string{},
 		},
+		{
+			name: "keeps flags that only share a prefix",
+			in:   []string{"--background-extra", "-debug", "-d-extra", "--backgrounding=true"},
+			want: []string{"--background-extra", "-debug", "-d-extra", "--backgrounding=true"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -186,6 +191,128 @@ func TestLogTailMissingFile(t *testing.T) {
 	isolate(t)
 	if got := LogTail(10); got != "" {
 		t.Fatalf("LogTail with no log file = %q, want empty", got)
+	}
+}
+
+func TestRunPathsStayInsideDataDir(t *testing.T) {
+	dir := isolate(t)
+	if got, want := Dir(), filepath.Join(dir, "run"); got != want {
+		t.Fatalf("Dir() = %q, want %q", got, want)
+	}
+	if got, want := PIDFile(), filepath.Join(dir, "run", "gateway.pid"); got != want {
+		t.Fatalf("PIDFile() = %q, want %q", got, want)
+	}
+	if got, want := LogPath(), filepath.Join(dir, "run", "gateway.log"); got != want {
+		t.Fatalf("LogPath() = %q, want %q", got, want)
+	}
+}
+
+func TestUnregisterPIDRemovesOwnClaim(t *testing.T) {
+	isolate(t)
+	RegisterPID()
+	UnregisterPID()
+	if _, err := os.Stat(PIDFile()); !os.IsNotExist(err) {
+		t.Fatalf("own pid file still present, stat err = %v", err)
+	}
+}
+
+func TestRegisterPIDIgnoresUnwritableRunDir(t *testing.T) {
+	base := t.TempDir()
+	blocker := filepath.Join(base, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	t.Setenv("DATA_DIR", blocker)
+
+	RegisterPID()
+
+	if pid := readPID(); pid != 0 {
+		t.Fatalf("readPID() = %d after a failed register, want 0", pid)
+	}
+}
+
+func TestRunningPIDRejectsNonPositive(t *testing.T) {
+	isolate(t)
+
+	// 0 is the missing-file sentinel, so a file that literally says 0 is not
+	// cleared: readPID already reported "no daemon".
+	writePIDFile(t, "0")
+	if pid := RunningPID(); pid != 0 {
+		t.Fatalf("RunningPID(0) = %d, want 0", pid)
+	}
+	if _, err := os.Stat(PIDFile()); err != nil {
+		t.Fatalf("literal 0 pid file should stay, stat err = %v", err)
+	}
+
+	for _, content := range []string{"-1", "  -4\n"} {
+		writePIDFile(t, content)
+		if pid := RunningPID(); pid != 0 {
+			t.Fatalf("RunningPID(%q) = %d, want 0", content, pid)
+		}
+		if _, err := os.Stat(PIDFile()); !os.IsNotExist(err) {
+			t.Fatalf("negative pid file %q must be removed, stat err = %v", content, err)
+		}
+	}
+}
+
+func TestRunningPIDTrimsWhitespace(t *testing.T) {
+	isolate(t)
+	pid := livePID(t)
+	writePIDFile(t, "\n"+strconv.Itoa(pid)+" \r\n")
+	if got := RunningPID(); got != pid {
+		t.Fatalf("RunningPID() = %d, want the trimmed live pid %d", got, pid)
+	}
+}
+
+func TestLogTailEmptyAndCarriageReturns(t *testing.T) {
+	dir := isolate(t)
+	logFile := filepath.Join(dir, "run", "gateway.log")
+	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+	if err := os.WriteFile(logFile, nil, 0644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if got := LogTail(5); got != "" {
+		t.Fatalf("LogTail of an empty file = %q, want empty", got)
+	}
+
+	// TrimRight only strips the trailing break, so a CR that belonged to a
+	// Windows line stays attached to that line when the tail is rejoined.
+	if err := os.WriteFile(logFile, []byte("a\r\nb\r\nc\r\n"), 0644); err != nil {
+		t.Fatalf("rewrite log: %v", err)
+	}
+	if got, want := LogTail(2), "b\r\nc"; got != want {
+		t.Fatalf("LogTail(2) = %q, want %q", got, want)
+	}
+	if got, want := LogTail(-1), "a\r\nb\r\nc"; got != want {
+		t.Fatalf("LogTail(-1) = %q, want the whole log", got)
+	}
+}
+
+func TestClearPIDMissingFile(t *testing.T) {
+	isolate(t)
+	clearPID()
+}
+
+func TestClearPIDLeavesFileWhenDirectoryIsNotWritable(t *testing.T) {
+	isolate(t)
+	writePIDFile(t, "123")
+	dir := Dir()
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatalf("chmod run dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	probe := filepath.Join(dir, "probe-write")
+	if err := os.WriteFile(probe, []byte("x"), 0644); err == nil {
+		t.Skip("process can still write the run directory; the remove-failure path needs a permission error")
+	}
+
+	clearPID()
+
+	if _, err := os.Stat(PIDFile()); err != nil {
+		t.Fatalf("pid file should remain when it cannot be removed, stat err = %v", err)
 	}
 }
 

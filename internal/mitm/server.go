@@ -152,6 +152,7 @@ func (s *Server) isRunning() bool {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+	defer recoverMitmAbort()
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
@@ -228,15 +229,24 @@ func newResponseWriter(conn net.Conn) *responseWriter {
 
 func (w *responseWriter) Header() http.Header { return w.header }
 
+// WroteHeader reports whether the status line was already written.
+func (w *responseWriter) WroteHeader() bool { return w.wroteHeader }
+
 func (w *responseWriter) Write(b []byte) (int, error) {
+	if w.conn == nil {
+		return 0, net.ErrClosed
+	}
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
+	}
+	if w.conn == nil {
+		return 0, net.ErrClosed
 	}
 	return w.conn.Write(b)
 }
 
 func (w *responseWriter) WriteHeader(code int) {
-	if w.wroteHeader {
+	if w.wroteHeader || w.conn == nil {
 		return
 	}
 	w.wroteHeader = true
@@ -248,6 +258,52 @@ func (w *responseWriter) WriteHeader(code int) {
 		}
 	}
 	fmt.Fprint(w.conn, "\r\n")
+}
+
+// Hijack detaches the client connection. The caller owns it afterwards.
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.conn == nil {
+		return nil, nil, fmt.Errorf("mitm response connection is not available")
+	}
+	conn := w.conn
+	w.conn = nil
+	return conn, bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), nil
+}
+
+// Abort resets the client TCP connection. A graceful close after the status
+// line would look like a finished response when Content-Length is absent.
+func (w *responseWriter) Abort() {
+	conn, _, err := w.Hijack()
+	if err != nil {
+		return
+	}
+	hardClose(conn)
+}
+
+func hardClose(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	raw := conn
+	if tc, ok := conn.(*tls.Conn); ok {
+		if inner := tc.NetConn(); inner != nil {
+			raw = inner
+		}
+	}
+	if tcp, ok := raw.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+		_ = tcp.Close()
+		return
+	}
+	_ = conn.Close()
+}
+
+func recoverMitmAbort() {
+	rec := recover()
+	if rec == nil || rec == http.ErrAbortHandler {
+		return
+	}
+	panic(rec)
 }
 
 // certToPEM returns the PEM-encoded bytes of an x509 certificate.
