@@ -16,8 +16,9 @@ import (
 	"time"
 
 	"9router/proxy/internal/constants"
-	"9router/proxy/internal/proxy/executor"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/providers"
+	"9router/proxy/internal/proxy/executor"
 	"9router/proxy/internal/translator"
 )
 
@@ -137,13 +138,11 @@ func (h *ChatHandler) MimoFreeChat(ctx context.Context, w http.ResponseWriter, b
 
 	if isStream {
 		h.handleStreamResponse(ctx, w, resp.Body, false, time.Now(), metrics)
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		io.Copy(w, resp.Body)
+		return nil
 	}
-
-	return nil
+	return handlerutil.RelayUpstream(w, http.StatusOK, resp.Body, func() {
+		w.Header().Set("Content-Type", "application/json")
+	})
 }
 
 // getMimoJWT returns a valid JWT, bootstrapping one if necessary.

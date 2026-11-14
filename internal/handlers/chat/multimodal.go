@@ -139,11 +139,13 @@ func (h *ChatHandler) forwardMultimodal(w http.ResponseWriter, r *http.Request, 
 	}
 	defer resp.Body.Close()
 
-	if ct := resp.Header.Get(constants.HeaderContentType); ct != "" {
-		w.Header().Set(constants.HeaderContentType, ct)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		if ct := resp.Header.Get(constants.HeaderContentType); ct != "" {
+			w.Header().Set(constants.HeaderContentType, ct)
+		}
+	}); err != nil {
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
 
 	if resp.StatusCode == http.StatusOK {
 		h.Repo.UpdateConnectionLastUsed(ctx.conn.ID)
@@ -234,11 +236,13 @@ func (h *ChatHandler) HandleAudioTranscriptions(w http.ResponseWriter, r *http.R
 	}
 	defer resp.Body.Close()
 
-	if ct := resp.Header.Get(constants.HeaderContentType); ct != "" {
-		w.Header().Set(constants.HeaderContentType, ct)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		if ct := resp.Header.Get(constants.HeaderContentType); ct != "" {
+			w.Header().Set(constants.HeaderContentType, ct)
+		}
+	}); err != nil {
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
 
 	if resp.StatusCode == http.StatusOK {
 		h.Repo.UpdateConnectionLastUsed(ctx.conn.ID)
@@ -357,9 +361,11 @@ func (h *ChatHandler) HandleVideoGet(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if err := handlerutil.RelayUpstream(w, resp.StatusCode, resp.Body, func() {
+		w.Header().Set("Content-Type", "application/json")
+	}); err != nil {
+		return
+	}
 
 	if resp.StatusCode == http.StatusOK {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)

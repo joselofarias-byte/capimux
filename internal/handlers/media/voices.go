@@ -673,7 +673,10 @@ func (h *MediaHandler) fetchMinimaxVoices(ctx context.Context, provider, voiceTy
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil, errors.New("failed to read upstream response")
+	}
 	var data map[string]any
 	if len(body) > 0 {
 		_ = json.Unmarshal(body, &data)
