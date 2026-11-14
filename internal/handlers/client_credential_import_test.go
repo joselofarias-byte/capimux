@@ -144,8 +144,11 @@ func TestClientKeyCannotOverwriteCredentials(t *testing.T) {
 			}
 			// The Codex loopback proxy stores the account when its callback
 			// lands, outside any dashboard request, so starting it is guarded.
-			if rec := c.do(http.MethodGet, "/api/oauth/codex/start-proxy", "", engineKeyAuth); rec.Code != http.StatusForbidden {
-				t.Errorf("codex start-proxy: expected 403 for a client key, got %d: %s", rec.Code, rec.Body.String())
+			// begin is the same listener reached by a browser navigation.
+			for _, path := range []string{"/api/oauth/codex/start-proxy", "/api/oauth/codex/begin"} {
+				if rec := c.do(http.MethodGet, path, "", engineKeyAuth); rec.Code != http.StatusForbidden {
+					t.Errorf("%s: expected 403 for a client key, got %d: %s", path, rec.Code, rec.Body.String())
+				}
 			}
 			// Since cycle 9 even a rename that keeps the key is admin-only.
 			if rec := c.do(http.MethodPut, "/api/connections/conn-owner", `{"name":"renamed","priority":1,"data":{"apiKey":"owner-upstream-key"}}`, engineKeyAuth); rec.Code != http.StatusForbidden {

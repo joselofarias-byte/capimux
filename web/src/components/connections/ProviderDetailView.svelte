@@ -299,6 +299,7 @@
   let callbackInput = $state('')
   let oauthError = $state<string | null>(null)
   let isConnecting = $state(false)
+  let isLaunchingOAuth = $state(false)
   let clineCodeVerifier = $state('')
   let clineRedirectUri = $state('')
   let pkceCodeVerifier = $state('')
@@ -1316,22 +1317,38 @@
     oauthError = null
     callbackInput = ''
     copiedAuthUrl = false
+    showOAuthModal = true
+    isLaunchingOAuth = true
+
     try {
       const redirectUri = antigravityCallback()
-      const res = await api.getAntigravityAuthorizeUrl(redirectUri)
-      oauthAuthUrl = res.authUrl || res.url || res.redirectUrl
-      if (res.state) {
-        rememberPending({
-          state: res.state,
-          redirectUri: res.redirectUri || redirectUri,
-        })
-      }
-      showOAuthModal = true
-      if (typeof window !== 'undefined' && oauthAuthUrl) {
-        window.open(oauthAuthUrl, '_blank', 'width=600,height=700')
+      const state =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID().replaceAll('-', '')
+          : Math.random().toString(36).slice(2) + Date.now().toString(36)
+
+      // This local endpoint responds with a server-side 302 to Google, so the
+      // browser navigation starts synchronously inside the original tap. No
+      // async fetch is needed before window.open(), which keeps Android Chrome
+      // from blocking or suspending the flow.
+      const q = new URLSearchParams({
+        redirect_uri: redirectUri,
+        state,
+        redirect: 'true',
+      })
+      oauthAuthUrl = `/api/oauth/antigravity/authorize?${q.toString()}`
+      pkceState = state
+      pkceRedirectUri = redirectUri
+      rememberPending({ state, redirectUri })
+
+      const popup = typeof window !== 'undefined' ? window.open(oauthAuthUrl, '_blank') : null
+      if (!popup) {
+        oauthError = 'The browser blocked the login tab. Tap Open below to continue.'
       }
     } catch (err) {
-      alert(`Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`)
+      oauthError = `Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`
+    } finally {
+      isLaunchingOAuth = false
     }
   }
 
@@ -1339,14 +1356,32 @@
     oauthError = null
     callbackInput = ''
     copiedAuthUrl = false
-    try {
-      if (providerId === 'codex') {
-        const delegated = await openCodexCLILogin()
-        if (delegated) return
+    showOAuthModal = true
+    isLaunchingOAuth = true
+
+    // Codex opens /api/oauth/codex/begin inside the tap. The server creates
+    // PKCE, starts the port-1455 listener and 302s to OpenAI. Awaiting the
+    // Codex CLI or that listener first is the HONOR 200 failure, and an
+    // about:blank tab never finishes there. CLI login is only the recovery
+    // when this tab is blocked: the begin request was not sent, so starting
+    // the CLI cannot tear the listener down underneath it.
+    if (providerId === 'codex') {
+      try {
+        await launchCodexBegin()
+      } catch (err) {
+        stopCodexPoll()
+        oauthError = `Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`
+      } finally {
+        isLaunchingOAuth = false
       }
-      // Codex cannot use the dashboard callback: OpenAI only accepts the
-      // redirect URI registered for the Codex CLI client.
-      const cb = providerId === 'codex' ? CODEX_REDIRECT_URI : dashboardCallback()
+      return
+    }
+
+    // Other PKCE providers keep the modal visible while the URL is prepared.
+    // If a late popup is blocked, the explicit Open button remains available
+    // instead of stranding the user on a blank tab.
+    try {
+      const cb = dashboardCallback()
       const res = await api.pkceAuthorize(
         providerId,
         providerId === 'gitlab'
@@ -1361,9 +1396,6 @@
       pkceCodeVerifier = res.codeVerifier || ''
       pkceState = res.state || ''
       pkceRedirectUri = res.redirectUri || cb
-      if (providerId === 'codex') {
-        await startCodexLoopback()
-      }
       rememberPending({
         state: pkceState,
         verifier: pkceCodeVerifier,
@@ -1375,66 +1407,100 @@
           clientSecret: gitlabClientSecret.trim(),
         },
       })
-      showOAuthModal = true
       if (typeof window !== 'undefined' && oauthAuthUrl) {
-        window.open(oauthAuthUrl, '_blank', 'width=600,height=700')
+        const popup = window.open(oauthAuthUrl, '_blank')
+        if (!popup) {
+          oauthError = 'The browser blocked the login tab. Tap Open below to continue.'
+        }
       }
     } catch (err) {
-      alert(`Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`)
+      oauthError = `Failed to initiate authorization: ${err instanceof Error ? err.message : String(err)}`
+    } finally {
+      isLaunchingOAuth = false
     }
   }
 
-  // Preferred path: exactly like AnyClaw, let the installed Codex CLI own
-  // OAuth end-to-end. If the CLI is absent we fall back to the legacy manual
-  // PKCE implementation below instead of making Codex login unavailable.
-  async function openCodexCLILogin(): Promise<boolean> {
-    // Reserve the browser tab synchronously while this click still carries a
-    // user gesture. Opening it only after the API await is what Chrome reports
-    // as a blocked popup and encourages repeated Login clicks/new OAuth states.
-    const popup =
-      typeof window !== 'undefined'
-        ? window.open('about:blank', '_blank', 'width=600,height=700')
-        : null
+  function codexBeginURL(): string {
+    const state =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID().replaceAll('-', '')
+        : Math.random().toString(36).slice(2) + Date.now().toString(36)
+    const appPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
+    pkceState = state
+    pkceRedirectUri = CODEX_REDIRECT_URI
+    pkceCodeVerifier = ''
+    const q = new URLSearchParams({ app_port: appPort, state })
+    return `/api/oauth/codex/begin?${q.toString()}`
+  }
 
-    try {
-      const res = await api.codexCLIStartLogin()
-      if (!res.success) {
-        try {
-          popup?.close()
-        } catch {
-          /* noop */
-        }
-        if (res.reason === 'codex_not_found') return false
-        throw new Error(
-          res.reason === 'url_timeout'
-            ? 'Codex CLI started but did not provide an authorization URL'
-            : 'Codex CLI login could not be started',
-        )
-      }
-      if (!res.sessionId || !res.authUrl) {
-        throw new Error('Codex CLI login returned an incomplete session')
-      }
+  function watchCodexBegin() {
+    stopCodexPoll()
+    codexPollTimer = setInterval(pollCodexStatus, 1500)
+  }
 
-      stopCodexPoll()
-      codexCliMode = true
-      codexCliSessionId = res.sessionId
-      pkceState = res.sessionId
-      oauthAuthUrl = res.authUrl
-      showOAuthModal = true
-      codexPollTimer = setInterval(pollCodexCLIStatus, 1500)
+  function rememberCodexBegin() {
+    rememberPending({ state: pkceState, redirectUri: CODEX_REDIRECT_URI })
+  }
 
-      if (popup && !popup.closed) {
-        popup.location.replace(oauthAuthUrl)
-      }
-      return true
-    } catch (err) {
-      try {
-        popup?.close()
-      } catch {
-        /* noop */
-      }
-      throw err
+  async function launchCodexBegin() {
+    const beginUrl = codexBeginURL()
+    oauthAuthUrl = beginUrl
+    const popup = typeof window !== 'undefined' ? window.open(beginUrl, '_blank') : null
+    if (popup) {
+      rememberCodexBegin()
+      watchCodexBegin()
+      return
     }
+    // No request was sent. Polling now would see "unknown" and wipe the
+    // fallback message before the user can tap Open.
+    await recoverBlockedCodexLogin(beginUrl)
+  }
+
+  // The begin navigation did not happen, so the loopback listener is not
+  // running. Main's preferred login is the installed Codex CLI; if that
+  // binary is absent, the Open button still targets the begin URL.
+  async function recoverBlockedCodexLogin(beginUrl: string) {
+    const delegated = await openCodexCLILogin()
+    if (delegated) {
+      oauthError = 'The browser blocked the login tab. Tap Reopen login below to continue.'
+      return
+    }
+    oauthAuthUrl = beginUrl
+    rememberCodexBegin()
+    oauthError = 'The browser blocked the login tab. Tap Open below to continue.'
+  }
+
+  function openOAuthUrl() {
+    if (!oauthAuthUrl || typeof window === 'undefined') return
+    window.open(oauthAuthUrl, '_blank')
+    if (providerId === 'codex' && !codexCliMode) watchCodexBegin()
+  }
+
+  // Official Codex CLI login from main. Called only after the begin tab was
+  // blocked, so there is no about:blank reservation: the Reopen button is the
+  // fresh gesture that navigates to the CLI authorization URL.
+  async function openCodexCLILogin(): Promise<boolean> {
+    const res = await api.codexCLIStartLogin()
+    if (!res.success) {
+      if (res.reason === 'codex_not_found') return false
+      throw new Error(
+        res.reason === 'url_timeout'
+          ? 'Codex CLI started but did not provide an authorization URL'
+          : 'Codex CLI login could not be started',
+      )
+    }
+    if (!res.sessionId || !res.authUrl) {
+      throw new Error('Codex CLI login returned an incomplete session')
+    }
+
+    stopCodexPoll()
+    codexCliMode = true
+    codexCliSessionId = res.sessionId
+    pkceState = res.sessionId
+    oauthAuthUrl = res.authUrl
+    showOAuthModal = true
+    codexPollTimer = setInterval(pollCodexCLIStatus, 1500)
+    return true
   }
 
   async function pollCodexCLIStatus() {
@@ -3011,10 +3077,11 @@
           <button
             type="button"
             onclick={handleAddConnectionClick}
-            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-brand-500 hover:bg-brand-600 text-white shadow-sm h-8 px-4 text-xs rounded-[8px]"
+            disabled={isLaunchingOAuth}
+            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 bg-brand-500 hover:bg-brand-600 text-white shadow-sm h-8 px-4 text-xs rounded-[8px]"
           >
-            <span class="material-symbols-outlined text-[18px]">login</span>
-            Connect Google Account
+            <span class="material-symbols-outlined text-[18px]">{isLaunchingOAuth ? 'progress_activity' : 'login'}</span>
+            {isLaunchingOAuth ? 'Opening…' : 'Connect Google Account'}
           </button>
         {:else if providerId === 'kiro'}
           <button
@@ -3029,10 +3096,11 @@
           <button
             type="button"
             onclick={handleAddConnectionClick}
-            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-8 px-4 text-xs rounded-[8px]"
+            disabled={isLaunchingOAuth}
+            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 bg-surface-2 hover:bg-surface-3 text-text-main border border-border h-8 px-4 text-xs rounded-[8px]"
           >
-            <span class="material-symbols-outlined text-[18px]">lock</span>
-            {oauthButtonLabel}
+            <span class="material-symbols-outlined text-[18px]">{isLaunchingOAuth ? 'progress_activity' : 'lock'}</span>
+            {isLaunchingOAuth ? 'Opening…' : oauthButtonLabel}
           </button>
           <button
             type="button"
@@ -3046,10 +3114,11 @@
           <button
             type="button"
             onclick={handleAddConnectionClick}
-            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] bg-brand-500 hover:bg-brand-600 text-white shadow-sm h-8 px-4 text-xs rounded-[8px]"
+            disabled={isLaunchingOAuth}
+            class="inline-flex items-center justify-center gap-2 font-semibold transition-all duration-150 ease-out cursor-pointer active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100 bg-brand-500 hover:bg-brand-600 text-white shadow-sm h-8 px-4 text-xs rounded-[8px]"
           >
-            <span class="material-symbols-outlined text-[18px]">add</span>
-            Add Connection
+            <span class="material-symbols-outlined text-[18px]">{isLaunchingOAuth ? 'progress_activity' : 'add'}</span>
+            {isLaunchingOAuth ? 'Opening…' : 'Add Connection'}
           </button>
         {/if}
         </div>
@@ -4070,11 +4139,13 @@
       <div class="flex items-center gap-2 px-3 py-2 border border-border rounded-lg bg-sidebar/50 mb-4">
         <span class="material-symbols-outlined text-base text-primary animate-spin">progress_activity</span>
         <span class="text-sm">
-          {providerId === 'freebuff'
-            ? 'Waiting for Freebuff authorization… (auto-polling active)'
-            : deviceUserCode
-              ? `Waiting for device authorization… (auto-check every ${deviceInterval}s)`
-              : 'Waiting for popup authorization…'}
+          {isLaunchingOAuth
+            ? 'Preparing secure login…'
+            : providerId === 'freebuff'
+              ? 'Waiting for Freebuff authorization… (auto-polling active)'
+              : deviceUserCode
+                ? `Waiting for device authorization… (auto-check every ${deviceInterval}s)`
+                : 'Waiting for popup authorization…'}
         </span>
       </div>
 
@@ -4159,8 +4230,9 @@
             />
             <button
               type="button"
-              onclick={() => window.open(oauthAuthUrl, '_blank')}
-              class="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-md border border-border bg-surface-2 hover:bg-surface-3 text-text-main cursor-pointer"
+              onclick={openOAuthUrl}
+              disabled={isLaunchingOAuth}
+              class="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-md border border-border bg-surface-2 hover:bg-surface-3 text-text-main cursor-pointer disabled:opacity-50"
             >
               <span class="material-symbols-outlined text-sm">open_in_new</span>
               Open

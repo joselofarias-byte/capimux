@@ -318,6 +318,10 @@ func mountOAuthRoutes(r interface {
 	// Codex's OAuth client only accepts its registered loopback redirect URI,
 	// so the callback is served by a dedicated fixed-port listener rather than
 	// the dashboard's /callback page. See internal/handlers/oauth/codex_proxy.go.
+	// begin is the mobile-safe GET for that same listener: the browser opens it
+	// inside the tap and the handler 302s to OpenAI after storing the account
+	// on callback, so it takes the same credential guard as start-proxy.
+	r.Get("/api/oauth/codex/begin", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleCodexBegin))
 	r.Get("/api/oauth/codex/start-proxy", guardCredentialWrite(oauthH.Repo, credentialUpsert, oauthH.HandleCodexStartProxy))
 	r.Get("/api/oauth/codex/poll-status", oauthH.HandleCodexPollStatus)
 	r.Get("/api/oauth/codex/stop-proxy", oauthH.HandleCodexStopProxy)
