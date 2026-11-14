@@ -240,6 +240,17 @@ func SetupDashboardRoutes(r chi.Router, repo *db.Repo, chatH *chat.ChatHandler) 
 	// Settings backup/restore + outbound proxy diagnostics (profile page)
 	r.Get("/api/settings/database", dashH.HandleExportDatabase)
 	r.Post("/api/settings/database", dashH.HandleImportDatabase)
+	// Drive backup exports, restores, and can store an OAuth refresh token.
+	// Same client-key refusal as the other credential-adjacent dashboard writes:
+	// a client API key gets 403. Session cookie and local CLI token pass.
+	r.Get("/api/settings/backup/google/status", adminOnly(repo, "consultar el respaldo de Google Drive", dashH.HandleGoogleBackupStatus))
+	r.Get("/api/settings/backup/google/authorize", adminOnly(repo, "autorizar Google Drive", dashH.HandleGoogleBackupAuthorize))
+	r.Post("/api/settings/backup/google/connect", adminOnly(repo, "conectar Google Drive", dashH.HandleGoogleBackupConnect))
+	r.Delete("/api/settings/backup/google", adminOnly(repo, "desconectar Google Drive", dashH.HandleGoogleBackupDisconnect))
+	r.Get("/api/settings/backup/google/files", adminOnly(repo, "listar respaldos de Google Drive", dashH.HandleGoogleBackupList))
+	r.Post("/api/settings/backup/google/restore", adminOnly(repo, "restaurar un respaldo de Google Drive", dashH.HandleGoogleBackupRestore))
+	r.Post("/api/settings/backup/google", adminOnly(repo, "subir un respaldo cifrado a Google Drive", dashH.HandleGoogleBackupUpload))
+	r.Post("/api/settings/backup/google/upload", adminOnly(repo, "subir un respaldo cifrado a Google Drive", dashH.HandleGoogleBackupUpload))
 	r.Post("/api/settings/proxy-test", dashH.HandleProxyTest)
 
 	// Headroom token-compression proxy management (dashboard parity)

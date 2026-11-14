@@ -15,6 +15,21 @@ import (
 	"9router/proxy/internal/auth"
 )
 
+func TestReadLimitedRejectsOversizedBodyWithoutEchoingIt(t *testing.T) {
+	payload := strings.Repeat("a", (1<<20)+8)
+	_, err := readLimited(strings.NewReader(payload), 1<<20)
+	if err == nil {
+		t.Fatal("expected size-limit error")
+	}
+	if strings.Contains(err.Error(), "aaaa") {
+		t.Fatal("size-limit error must not echo the body")
+	}
+	got, err := readLimited(strings.NewReader(`{"ok":true}`), 1<<20)
+	if err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("small body: %q err=%v", got, err)
+	}
+}
+
 func clearGoogleBackupStatesForTest() {
 	googleDriveBackupStates.Range(func(key, value any) bool {
 		googleDriveBackupStates.Delete(key)
@@ -68,8 +83,8 @@ func TestHandleGoogleBackupAuthorizeUsesNarrowDriveScope(t *testing.T) {
 	if body.Scope != googleDriveBackupScope {
 		t.Fatalf("scope=%q want=%q", body.Scope, googleDriveBackupScope)
 	}
-	if body.Persistent {
-		t.Fatal("one-shot Google OAuth must not claim persistent credentials")
+	if !body.Persistent {
+		t.Fatal("Google Drive OAuth must advertise persistent credentials")
 	}
 	u, err := url.Parse(body.URL)
 	if err != nil {
@@ -82,8 +97,8 @@ func TestHandleGoogleBackupAuthorizeUsesNarrowDriveScope(t *testing.T) {
 	if q.Get("scope") == "https://www.googleapis.com/auth/drive" {
 		t.Fatal("oauth URL requested full Drive scope")
 	}
-	if q.Get("access_type") != "online" {
-		t.Fatalf("access_type=%q want online", q.Get("access_type"))
+	if q.Get("access_type") != "offline" {
+		t.Fatalf("access_type=%q want offline", q.Get("access_type"))
 	}
 }
 
@@ -127,7 +142,7 @@ func TestHandleGoogleBackupUploadEncryptsBeforeDriveAndRotates(t *testing.T) {
 				t.Errorf("unexpected OAuth client credentials")
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"access_token":"ACCESS_VALUE","token_type":"Bearer","expires_in":3600}`)
+			_, _ = io.WriteString(w, `{"access_token":"ACCESS_VALUE","refresh_token":"REFRESH_VALUE","token_type":"Bearer","expires_in":3600}`)
 
 		case r.URL.Path == "/drive/v3/files" && r.Method == http.MethodGet:
 			if r.Header.Get("Authorization") != "Bearer ACCESS_VALUE" {
@@ -249,7 +264,7 @@ func TestHandleGoogleBackupUploadEncryptsBeforeDriveAndRotates(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.Success || response.RotatedDeleted != 1 || response.OAuthPersisted {
+	if !response.Success || response.RotatedDeleted != 1 || !response.OAuthPersisted {
 		t.Fatalf("unexpected response: %s", rec.Body.String())
 	}
 	if tokenHits.Load() != 1 {
@@ -294,5 +309,41 @@ func TestValidateGoogleBackupRedirectURIRejectsPlainHTTPRemoteHost(t *testing.T)
 	}
 	if err := validateGoogleBackupRedirectURI("https://example.com/callback"); err != nil {
 		t.Fatalf("https redirect rejected: %v", err)
+	}
+}
+
+func TestHandleGoogleBackupStatusDoesNotExposeCredentials(t *testing.T) {
+	repo, cleanup := setupSettingsTestDB(t)
+	defer cleanup()
+	router := setupTestRouter(repo)
+
+	t.Setenv("GOOGLE_DRIVE_BACKUP_CLIENT_ID", "CLIENT_ID_VALUE")
+	t.Setenv("GOOGLE_DRIVE_BACKUP_CLIENT_SECRET", "CLIENT_SECRET_VALUE")
+	if err := repo.UpdateSettingsRaw(map[string]any{
+		googleDriveBackupRefreshTokenSetting: "REFRESH_SECRET_VALUE",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/backup/google/status", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["configured"] != true || body["connected"] != true || body["encrypted"] != true {
+		t.Fatalf("unexpected status response: %s", rec.Body.String())
+	}
+	if body["folder"] != googleDriveBackupFolderName {
+		t.Fatalf("folder=%v", body["folder"])
+	}
+	raw := rec.Body.String()
+	if strings.Contains(raw, "CLIENT_ID_VALUE") || strings.Contains(raw, "CLIENT_SECRET_VALUE") || strings.Contains(raw, "REFRESH_SECRET_VALUE") {
+		t.Fatal("status endpoint leaked OAuth credentials")
 	}
 }
